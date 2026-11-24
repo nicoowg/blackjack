@@ -354,114 +354,600 @@ function snd(kind) {
 addEventListener('pointerdown', audio, { capture: true });
 addEventListener('keydown', audio, { capture: true });
 
-// ---------- forbindelse ----------
-let ws = null, wsOk = false, retry = 0, token = localStorage.getItem('kort.token') || '';
-let screen = 'login', lastLobby = null, link = '';
-function connect() {
-  ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
-  ws.onopen = () => { wsOk = true; retry = 0; $('status').classList.remove('on'); if (token) send({ t: 'resume', token }); else show('login') };
-  ws.onmessage = (e) => { let m; try { m = JSON.parse(e.data) } catch (x) { return } onMsg(m) };
-  ws.onclose = () => { wsOk = false; $('status').classList.add('on'); setTimeout(connect, Math.min(4000, 400 * ++retry)) };
+// ---------- motoren (kører i browseren: solo her, bordet hos den der har lavet det) ----------
+const START = 500, DECKS = 6;
+// ---------- kort ----------
+let cardId = 1;
+const val = (c) => Math.min(c.r, 10);
+function score(cards) {
+  let t = 0, ace = false;
+  for (const c of cards) { if (c.down) continue; t += val(c); if (c.r === 1) ace = true }
+  const soft = ace && t + 10 <= 21;
+  return { total: soft ? t + 10 : t, soft, low: t };
 }
-const send = (o) => { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)) };
-setInterval(() => send({ t: 'ping' }), 5000);
-setTimeout(() => { if (!wsOk) $('status').classList.add('on') }, 1500);
+const isBJ = (cards) => cards.length === 2 && score(cards).total === 21;
+function rnd(n) { const a = new Uint32Array(1); crypto.getRandomValues(a); return a[0] % n }
 
+// ---------- bord ----------
+const BET_WAIT = 14000, TURN_WAIT = 25000, INS_WAIT = 10000;
+
+class Table {
+  constructor(id, solo) {
+    this.id = id; this.solo = solo; this.max = solo ? 1 : 5;
+    this.seats = Array(this.max).fill(null);
+    this.watch = new Set();            // klient-forbindelser
+    this.phase = 'bet'; this.dealer = []; this.turn = null; this.timer = null; this.timerKind = '';
+    this.shuffle(); this.round = 0; this.users = new Map();
+  }
+  shuffle() {
+    const s = [];
+    for (let d = 0; d < DECKS; d++) for (const su of 'shdc') for (let r = 1; r <= 13; r++) s.push({ r, s: su });
+    for (let i = s.length - 1; i > 0; i--) { const j = rnd(i + 1); [s[i], s[j]] = [s[j], s[i]] }
+    this.shoe = s; this.pos = 0; this.cut = s.length - 60 - rnd(25); this.shuffledAt = Date.now();
+  }
+  draw(down = false) {
+    if (this.pos >= this.shoe.length) this.shuffle();
+    const c = this.shoe[this.pos++];
+    return { id: cardId++, r: c.r, s: c.s, down };
+  }
+  user(k) { return this.users.get(k) }
+  seatOf(k) { return this.seats.findIndex((s) => s && s.k === k) }
+  sit(k, name, aura) {
+    if (!this.users.has(k)) this.users.set(k, { name, aura: Math.max(0, Math.min(1e7, Number(aura) || 0)) });
+    let i = this.seatOf(k);
+    if (i >= 0) { this.seats[i].away = false; return i }
+    // midten først, så udad (bordet fyldes pænt)
+    const order = this.max === 1 ? [0] : [2, 1, 3, 0, 4];
+    i = order.find((j) => !this.seats[j]);
+    if (i === undefined) return -1;
+    this.seats[i] = { k, pend: 0, last: 0, ready: false, hands: [], ins: 0, insDone: false, away: false };
+    if (this.phase === 'bet') this.rebet(this.seats[i]);
+    this.broadcast();
+    return i;
+  }
+  leave(k) {
+    const i = this.seatOf(k); if (i < 0) return;
+    const s = this.seats[i];
+    if (this.phase === 'bet' || !s.hands.length) { this.seats[i] = null; this.checkStart() }
+    else { s.away = true; if (this.turn && this.turn.seat === i) this.wake() }  // fjernes når runden er slut
+    this.broadcast();
+  }
+  rebet(s) {
+    const u = this.user(s.k);
+    s.pend = s.last && u && u.aura >= s.last ? s.last : 0; s.ready = false; s.touched = false;
+  }
+  players() { return this.seats.map((s, i) => ({ s, i })).filter((x) => x.s) }
+  active() { return this.players().filter((x) => x.s.hands.length) }
+
+  // ----- beskeder fra spillere -----
+  act(k, o) {
+    const i = this.seatOf(k); if (i < 0) return;
+    const s = this.seats[i], u = this.user(s.k);
+    if (this.phase === 'bet') {
+      if (o.t === 'chip') {
+        const v = [5, 25, 100, 500].includes(o.v) ? o.v : 0;
+        if (!v || s.ready || u.aura - s.pend < v || s.pend + v > 5000) return;
+        s.pend += v; s.touched = true; this.armBetTimer();
+      } else if (o.t === 'clear') { if (!s.ready) s.pend = 0 }
+      else if (o.t === 'deal') { if (s.pend > 0 && s.pend <= u.aura) { s.ready = true; this.armBetTimer() } this.checkStart() }
+      else if (o.t === 'restart') { if (u.aura < 5 && !s.pend) { u.aura = START; u.restarts = (u.restarts || 0) + 1;  } }
+      return this.broadcast();
+    }
+    if (this.phase === 'insurance') {
+      if (s.insDone || !s.hands.length) return;
+      if (o.t === 'ins') { const c = s.hands[0].bet / 2; if (u.aura >= c) { u.aura -= c; s.ins = c;  } s.insDone = true }
+      else if (o.t === 'noins') s.insDone = true;
+      else return;
+      this.broadcast();
+      if (this.players().every((x) => !x.s.hands.length || x.s.insDone)) this.wake();
+      return;
+    }
+    if (this.phase === 'play' && this.turn && this.turn.seat === i && !this.busy) {
+      const h = s.hands[this.turn.hand];
+      const allowed = this.allowed(s, h);
+      if (!allowed.includes(o.t)) return;
+      this.busy = true;
+      this.doAction(s, h, o.t).finally(() => { this.busy = false });
+    }
+  }
+  allowed(s, h) {
+    if (!h || h.done) return [];
+    const u = this.user(s.k), a = ['hit', 'stand'];
+    if (h.cards.length === 2 && !h.aces && u.aura >= h.bet) a.push('double');
+    if (h.cards.length === 2 && val(h.cards[0]) === val(h.cards[1]) && s.hands.length < 4 && u.aura >= h.bet && !h.aces) a.push('split');
+    if (h.cards.length === 2 && s.hands.length === 1 && !h.split) a.push('surrender');
+    return a;
+  }
+  async doAction(s, h, t) {
+    const u = this.user(s.k);
+    if (t === 'hit') { h.cards.push(this.draw()); await this.step(420); this.checkHand(h) }
+    else if (t === 'stand') { h.done = true }
+    else if (t === 'double') {
+      u.aura -= h.bet; h.bet *= 2; h.doubled = true; 
+      const c = this.draw(); c.side = true; h.cards.push(c); await this.step(520);
+      h.done = true; if (score(h.cards).total > 21) h.bust = true;
+    } else if (t === 'split') {
+      u.aura -= h.bet; 
+      const aces = h.cards[0].r === 1;
+      const nh = { cards: [h.cards.pop()], bet: h.bet, split: true, aces, done: false };
+      h.split = true; h.aces = aces;
+      const idx = s.hands.indexOf(h); s.hands.splice(idx + 1, 0, nh);
+      await this.step(380);
+      h.cards.push(this.draw()); await this.step(420);
+      if (aces) { nh.cards.push(this.draw()); await this.step(420); h.done = nh.done = true }
+      else this.checkHand(h);
+    } else if (t === 'surrender') { h.done = true; h.surr = true; u.aura += h.bet / 2;  }
+    this.broadcast();
+    this.wake();
+  }
+  checkHand(h) {
+    const t = score(h.cards).total;
+    if (t > 21) { h.bust = true; h.done = true } else if (t === 21) h.done = true;
+  }
+
+  // ----- tidsstyring -----
+  armBetTimer() {
+    if (this.solo || this.timer) return;
+    this.setTimer(BET_WAIT, 'bet', () => this.start());
+  }
+  setTimer(ms, kind, fn) {
+    this.clearTimer();
+    this.timerKind = kind; this.timerEnd = Date.now() + ms;
+    this.timer = setTimeout(() => { this.timer = null; this.timerKind = ''; fn() }, ms);
+  }
+  clearTimer() { if (this.timer) clearTimeout(this.timer); this.timer = null; this.timerKind = '' }
+  wait(ms, kind) {
+    // venter på spillerne eller på tiden (solo: ingen tid)
+    return new Promise((res) => {
+      this._wake = () => { this._wake = null; this.clearTimer(); res() };
+      if (ms && !this.solo) this.setTimer(ms, kind, () => this._wake && this._wake());
+      else if (ms && this.solo && kind === 'ins') { /* solo: venter på svar */ }
+    });
+  }
+  wake() { if (this._wake) this._wake() }
+  checkStart() {
+    if (this.phase !== 'bet') return;
+    const p = this.players();
+    if (!p.length) { this.clearTimer(); return }
+    const bettors = p.filter((x) => x.s.pend > 0);
+    if (bettors.length && p.every((x) => x.s.ready || x.s.away)) this.start();
+  }
+  step(ms) { this.broadcast(); return sleep(ms) }
+
+  // ----- runden -----
+  async start() {
+    if (this.phase !== 'bet') return;
+    this.clearTimer();
+    const dealt = (s) => s.pend > 0 && !s.away && (s.ready || s.touched) && s.pend <= this.user(s.k).aura;
+    const ps = this.players().filter((x) => dealt(x.s));
+    if (!ps.length) { this.players().forEach((x) => { x.s.ready = false }); return this.broadcast() }
+    this.phase = 'deal'; this.round++;
+    for (const { s } of this.players()) {
+      const u = this.user(s.k);
+      if (dealt(s)) {
+        u.aura -= s.pend; s.last = s.pend;
+        s.hands = [{ cards: [], bet: s.pend, done: false }];
+        u.hands = (u.hands || 0) + 1;
+        s.pend = 0;
+      } else s.hands = [];
+      s.ready = false; s.ins = 0; s.insDone = false; s.net = 0;
+    }
+    
+    const order = this.active().sort((a, b) => a.i - b.i);
+    await this.step(250);
+    for (let r = 0; r < 2; r++) {
+      for (const { s } of order) { s.hands[0].cards.push(this.draw()); await this.step(330) }
+      this.dealer.push(this.draw(r === 1)); await this.step(380);
+    }
+    const up = this.dealer[0];
+    if (up.r === 1) {
+      this.phase = 'insurance';
+      for (const { s } of order) { if (this.user(s.k).aura < s.hands[0].bet / 2 || isBJ(s.hands[0].cards)) s.insDone = true; if (s.away) s.insDone = true }
+      this.broadcast();
+      if (order.some(({ s }) => !s.insDone)) await this.wait(INS_WAIT, 'ins');
+      order.forEach(({ s }) => { s.insDone = true });
+    }
+    if (up.r === 1 || val(up) === 10) {
+      this.phase = 'peek'; this.peek = true; await this.step(750); this.peek = false;
+      const hole = this.dealer[1];
+      const dbj = val(up) + val(hole) === 11 && (up.r === 1 || hole.r === 1);
+      if (dbj) { hole.down = false; await this.step(600); return this.finish(true) }
+      // forsikringen er tabt
+      for (const { s } of order) s.ins = 0;
+    }
+    // naturlige blackjacks betales med det samme
+    for (const { s } of order) { const h = s.hands[0]; if (isBJ(h.cards)) { h.done = true; h.bj = true } }
+    this.phase = 'play';
+    for (const { s, i } of order) {
+      for (let hi = 0; hi < s.hands.length; hi++) {
+        const h = s.hands[hi];
+        this.turn = { seat: i, hand: hi };
+        if (h.cards.length === 1) { h.cards.push(this.draw()); await this.step(420); if (h.aces) h.done = true; else this.checkHand(h) }
+        while (!h.done) {
+          if (s.away) { h.done = true; break }
+          this.broadcast();
+          await this.wait(TURN_WAIT, 'turn');
+          while (this.busy) await sleep(40);
+          if (!h.done && !this.solo && this.timerEnd && Date.now() >= this.timerEnd - 50) h.done = true; // tiden løb ud: stå
+        }
+        this.broadcast(); await sleep(260);
+      }
+    }
+    this.turn = null;
+    return this.finish(false);
+  }
+  async finish(dealerBJ) {
+    const order = this.active().sort((a, b) => a.i - b.i);
+    this.phase = 'dealer';
+    const hole = this.dealer[1];
+    if (hole && hole.down) { hole.down = false; await this.step(620) }
+    const live = order.some(({ s }) => s.hands.some((h) => !h.bust && !h.surr && !h.bj));
+    if (!dealerBJ && live) {
+      while (score(this.dealer).total < 17) { this.dealer.push(this.draw()); await this.step(560) }
+    }
+    const d = score(this.dealer).total, dbust = d > 21;
+    for (const { s } of order) {
+      const u = this.user(s.k); let net = 0;
+      if (s.ins) { if (dealerBJ) { u.aura += s.ins * 3; net += s.ins * 2 } else net -= s.ins }
+      for (const h of s.hands) {
+        const p = score(h.cards).total; let back = 0;
+        if (h.surr) { back = 0; h.res = 'surr'; net -= h.bet / 2; continue }
+        if (dealerBJ) { if (h.cards.length === 2 && isBJ(h.cards) && !h.split) { back = h.bet; h.res = 'push' } else h.res = 'lose' }
+        else if (h.bj) { back = h.bet * 2.5; h.res = 'bj' }
+        else if (h.bust) h.res = 'bust';
+        else if (dbust || p > d) { back = h.bet * 2; h.res = 'win' }
+        else if (p === d) { back = h.bet; h.res = 'push' }
+        else h.res = 'lose';
+        h.net = back - h.bet; net += h.net; u.aura += back;
+      }
+      s.net = net; u.best = Math.max(u.best || 0, u.aura);
+    }
+    
+    this.phase = 'result'; this.broadcast();
+    await sleep(this.solo ? 2400 : 3600);
+    // ryd bordet
+    this.dealer = [];
+    for (const x of this.players()) { x.s.hands = []; x.s.ins = 0; x.s.net = 0 }
+    for (let i = 0; i < this.max; i++) if (this.seats[i] && this.seats[i].away) this.seats[i] = null;
+    this.phase = 'bet';
+    let shuffled = false;
+    if (this.pos >= this.cut) { this.shuffle(); shuffled = true }
+    for (const x of this.players()) { if (x.s.pend) x.s.ready = false; else this.rebet(x.s) }
+    this.broadcast(shuffled ? { shuffle: true } : null);
+  }
+
+  // ----- tilstand ud -----
+  view(k) {
+    const me = this.seatOf(k);
+    const pub = (c) => (c.down ? { id: c.id, down: true } : { id: c.id, r: c.r, s: c.s, side: !!c.side });
+    const seats = this.seats.map((s, i) => {
+      if (!s) return null;
+      const u = this.user(s.k);
+      return {
+        name: u.name, aura: u.aura, pend: s.pend, ready: s.ready, away: s.away, ins: s.ins, net: s.net || 0,
+        hands: s.hands.map((h) => {
+          const sc = score(h.cards);
+          return { cards: h.cards.map(pub), bet: h.bet, total: sc.total, soft: sc.soft && sc.total < 21 && !h.done, done: h.done, res: this.phase === 'result' ? h.res : (h.bust ? 'bust' : h.bj ? 'bj' : h.surr ? 'surr' : ''), net: h.net || 0, doubled: !!h.doubled };
+        }),
+      };
+    });
+    const ds = score(this.dealer);
+    let actions = [];
+    if (me >= 0) {
+      const s = this.seats[me], u = this.user(s.k);
+      if (this.phase === 'bet') {
+        if (u.aura < 5 && !s.pend) actions = ['restart'];
+        else if (!s.ready) { actions = [5, 25, 100, 500].filter((v) => u.aura - s.pend >= v).map((v) => 'c' + v); if (s.pend) actions.push('clear', 'deal') }
+      } else if (this.phase === 'insurance' && s.hands.length && !s.insDone) actions = ['ins', 'noins'];
+      else if (this.phase === 'play' && this.turn && this.turn.seat === me) actions = this.allowed(s, s.hands[this.turn.hand]);
+    }
+    return {
+      t: 'state', id: this.id, solo: this.solo, max: this.max, phase: this.phase, me, seats, actions,
+      dealer: { cards: this.dealer.map(pub), total: ds.total, soft: ds.soft && this.phase !== 'result' && this.phase !== 'dealer' },
+      turn: this.turn, peek: !!this.peek,
+      timer: this.timerKind ? { kind: this.timerKind, left: Math.max(0, this.timerEnd - Date.now()), total: this.timerKind === 'bet' ? BET_WAIT : this.timerKind === 'turn' ? TURN_WAIT : INS_WAIT } : null,
+      shoe: { left: this.shoe.length - this.pos, total: this.shoe.length, cut: this.shoe.length - this.cut },
+      watchers: this.watch.size,
+    };
+  }
+  broadcast(extra) {
+    for (const c of this.watch) { const v = this.view(c.k); if (extra) Object.assign(v, extra); c.send(v) }
+  }
+}
+
+
+// ---------- konti (på denne enhed) ----------
+// Navn + 4-cifret kode. Koden gemmes kun som PBKDF2-hash. Aura følger kontoen på enheden.
+const GH = 'https://nicoowg.github.io/blackjack/';
+const enc = (t) => new TextEncoder().encode(t);
+const hex = (b) => [...new Uint8Array(b)].map((x) => x.toString(16).padStart(2, '0')).join('');
+const rid = (n) => { const a = new Uint8Array(n); crypto.getRandomValues(a); return hex(a) };
+const cleanName = (s) => String(s || '').normalize('NFC').replace(/[^\p{L}\p{N} ._-]/gu, '').replace(/\s+/g, ' ').trim().slice(0, 14);
+let konti = {};
+try { konti = JSON.parse(localStorage.getItem('kort.konti') || '{}') || {} } catch (e) { konti = {} }
+const gemKonti = () => { try { localStorage.setItem('kort.konti', JSON.stringify(konti)) } catch (e) {} };
+async function hashPin(pin, salt) {
+  const key = await crypto.subtle.importKey('raw', enc(pin), 'PBKDF2', false, ['deriveBits']);
+  return hex(await crypto.subtle.deriveBits({ name: 'PBKDF2', salt: enc(salt), iterations: 150000, hash: 'SHA-256' }, key, 256));
+}
+let acc = null; // den indloggede konto
+function setAura(a) { if (!acc) return; acc.aura = Math.round(a * 10) / 10; acc.best = Math.max(acc.best || 0, acc.aura); gemKonti() }
+
+// ---------- forbindelse ----------
+let screen = 'login', me = null;
+let soloTable = null, table = null;   // table = det bord jeg selv kører (solo eller vært)
+let peer = null, guest = null, code = '', hosting = false;
+const myClient = { k: '', send: (v) => onState(v) };
+
+function onState(v) {
+  if (v.t === 'state' && v.me >= 0 && v.seats[v.me]) setAura(v.seats[v.me].aura);
+  onMsg(v);
+}
 function onMsg(m) {
-  if (m.t === 'auth') {
-    if (m.ok) { token = m.token; localStorage.setItem('kort.token', token); me = m.me }
-    else { token = ''; localStorage.removeItem('kort.token'); show('login') }
-  } else if (m.t === 'lobby') { lastLobby = m; if (m.link !== undefined) link = m.link; me = m.me; renderLobby(m); show('lobby') }
-  else if (m.t === 'link') { link = m.link; if (lastLobby) renderLobby(lastLobby); syncLinkBtns() }
-  else if (m.t === 'exists') onExists(m);
-  else if (m.t === 'state') { show('game'); renderGame(m) }
+  if (m.t === 'state') { show('game'); renderGame(m) }
   else if (m.t === 'full') toast('Bordet er fuldt, du ser med');
 }
-let me = null;
-
+// alt hvad knapperne sender, går her igennem
+function send(o) {
+  if (o.t === 'leave') return leaveTable();
+  if (table) table.act(acc.id, o);
+  else if (guest && guest.open) guest.send(o);
+}
 function show(s) {
   if (screen === s && document.querySelector('.screen.on')) return;
   screen = s;
   document.querySelectorAll('.screen').forEach((el) => el.classList.toggle('on', el.id === { login: 'sLogin', lobby: 'sLobby', game: 'game' }[s]));
   if (s === 'login') { resetLogin(); setTimeout(() => $('name').focus(), 80) }
+  if (s === 'lobby') renderLobby();
   if (s !== 'game') { clearTable(); $('dock').classList.add('off') }
 }
 let toastT = 0;
-function toast(t) { const el = $('toast'); el.textContent = t; el.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => el.classList.remove('on'), 1900) }
+function toast(t) { const el = $('toast'); el.textContent = t; el.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => el.classList.remove('on'), 2200) }
+const hashCode = () => { const m = location.hash.match(/^#([A-Z0-9]{5}\d)$/i); return m ? m[1].toUpperCase() : '' };
+
+function sitLocal(tb) {
+  myClient.k = acc.id;
+  tb.watch.add(myClient);
+  const seat = tb.sit(acc.id, acc.name, acc.aura);
+  if (seat < 0) toast('Bordet er fuldt');
+  tb.broadcast();
+}
+function playSolo() {
+  if (!soloTable) soloTable = new Table('solo', true);
+  table = soloTable; sitLocal(table);
+}
+function newCode() { const A = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; let c = ''; for (let i = 0; i < 5; i++) c += A[rnd(A.length)]; return c }
+// ---------- relæ: lille MQTT-klient over WebSocket (ingen biblioteker) ----------
+// Bordet kører i værtens browser. Gæster og vært sender beskeder gennem et gratis offentligt MQTT-relæ.
+// Det går over almindelig wss (port 443-agtig), så det virker bag routere og på mobilnet.
+const BROKERS = ['wss://broker.emqx.io:8084/mqtt', 'wss://test.mosquitto.org:8081/mqtt'];
+const TOPIC = (c) => 'kort-blackjack/v1/' + c;
+class Relay {
+  constructor(url) { this.url = url; this.subs = new Set(); this.on = null; this.ws = null; this.alive = true; this.pid = 1; this.buf = new Uint8Array(0); this.up = false; this.onstate = null }
+  open() {
+    this.buf = new Uint8Array(0);
+    return new Promise((resolve) => {
+      let done = false;
+      const fin = (ok) => { if (!done) { done = true; resolve(ok) } };
+      const ws = new WebSocket(this.url, ['mqtt']); ws.binaryType = 'arraybuffer'; this.ws = ws;
+      const to = setTimeout(() => { fin(false); try { ws.close() } catch (e) {} }, 7000);
+      ws.onopen = () => {
+        const id = enc('kort' + rid(8));
+        this.raw(0x10, [0, 4, 77, 81, 84, 84, 4, 2, 0, 40, id.length >> 8, id.length & 255, ...id]);
+      };
+      ws.onmessage = (e) => { this.feed(new Uint8Array(e.data), () => { clearTimeout(to); this.up = true; for (const t of this.subs) this.subRaw(t); fin(true); this.onstate && this.onstate(true) }) };
+      ws.onclose = () => {
+        clearTimeout(to); fin(false);
+        const was = this.up; this.up = false;
+        if (was && this.onstate) this.onstate(false);
+        if (this.alive && was) setTimeout(() => { if (this.alive) this.open() }, 1200);
+      };
+      ws.onerror = () => {};
+    });
+  }
+  close() { this.alive = false; try { this.ws.close() } catch (e) {} clearInterval(this.pingT) }
+  len(n) { const o = []; do { let b = n % 128; n = Math.floor(n / 128); if (n > 0) b |= 128; o.push(b) } while (n > 0); return o }
+  raw(h, body) { if (this.ws && this.ws.readyState === 1) this.ws.send(new Uint8Array([h, ...this.len(body.length), ...body])) }
+  str(t) { const b = enc(t); return [b.length >> 8, b.length & 255, ...b] }
+  sub(t) { this.subs.add(t); if (this.up) this.subRaw(t) }
+  subRaw(t) { const id = this.pid++ & 0xffff || 1; this.raw(0x82, [id >> 8, id & 255, ...this.str(t), 0]) }
+  pub(t, obj) {
+    if (!this.up) return;
+    const p = enc(JSON.stringify(obj)), tb = this.str(t);
+    const body = new Uint8Array(tb.length + p.length); body.set(tb); body.set(p, tb.length);
+    const hdr = [0x30, ...this.len(body.length)];
+    const out = new Uint8Array(hdr.length + body.length); out.set(hdr); out.set(body, hdr.length);
+    try { this.ws.send(out) } catch (e) {}
+  }
+  feed(d, onConnack) {
+    const b = new Uint8Array(this.buf.length + d.length); b.set(this.buf); b.set(d, this.buf.length);
+    let i = 0;
+    for (;;) {
+      if (b.length - i < 2) break;
+      let mul = 1, len = 0, j = i + 1, byte;
+      do { if (j >= b.length) { j = -1; break } byte = b[j++]; len += (byte & 127) * mul; mul *= 128 } while (byte & 128);
+      if (j < 0 || b.length - j < len) break;
+      const type = b[i] >> 4, flags = b[i] & 15, body = b.subarray(j, j + len);
+      if (type === 2) { if (body[1] === 0) { onConnack(); clearInterval(this.pingT); this.pingT = setInterval(() => this.raw(0xc0, []), 20000) } }
+      else if (type === 3) {
+        const tl = (body[0] << 8) | body[1], topic = new TextDecoder().decode(body.subarray(2, 2 + tl));
+        let k = 2 + tl; if ((flags >> 1) & 3) k += 2;
+        let o = null; try { o = JSON.parse(new TextDecoder().decode(body.subarray(k))) } catch (e) {}
+        if (o && typeof o === 'object' && this.on) { try { this.on(topic, o) } catch (e) { console.error(e) } }
+      }
+      i = j + len;
+    }
+    this.buf = b.slice(i);
+  }
+}
+async function relayFor(idx) {
+  const order = idx == null ? BROKERS.map((_, i) => i) : [idx];
+  for (const i of order) { const r = new Relay(BROKERS[i]); if (await r.open()) return { r, i }; r.close() }
+  return null;
+}
+let relay = null, netTimers = [];
+const every = (ms, fn) => { const t = setInterval(fn, ms); netTimers.push(t); return t };
+
+// vært: laver et bord, som vennerne kommer ind på via linket
+async function hostTable() {
+  closeNet();
+  $('status').classList.add('on');
+  const got = await relayFor(null);
+  $('status').classList.remove('on');
+  if (!got) return toast('Ingen forbindelse til nettet');
+  const c = newCode(), base = TOPIC(c);
+  relay = got.r; code = c + got.i; hosting = true;
+  history.replaceState(null, '', '#' + code);
+  table = new Table('bord', false); sitLocal(table);
+  const guests = new Map(); // gid -> {client, seen}
+  relay.sub(base + '/up');
+  relay.on = (topic, m) => {
+    if (!table || topic !== base + '/up') return;
+    const gid = String(m.g || '').replace(/[^a-f0-9]/g, '').slice(0, 32);
+    if (gid.length < 16) return;
+    const k = 'g:' + gid, o = m.o || {};
+    let g = guests.get(gid);
+    if (o.t === 'hello') {
+      if (!g) {
+        const client = { k, send: (v) => relay && relay.pub(base + '/dn/' + gid, v) };
+        g = { client, seen: Date.now() }; guests.set(gid, g);
+        table.watch.add(client);
+        const seat = table.sit(k, cleanName(o.name) || 'Gæst', o.aura);
+        if (seat < 0) client.send({ t: 'full' });
+      }
+      g.seen = Date.now(); table.broadcast(); return;
+    }
+    if (!g) return;
+    g.seen = Date.now();
+    if (o.t === 'bye') { drop(gid); return }
+    if (o.t !== 'hb') table.act(k, o);
+  };
+  const drop = (gid) => { const g = guests.get(gid); if (!g || !table) return; guests.delete(gid); table.watch.delete(g.client); table.leave(g.client.k) };
+  every(4000, () => relay && relay.pub(base + '/hb', { t: 'hb' }));
+  every(3000, () => { const now = Date.now(); for (const [gid, g] of guests) if (now - g.seen > 15000) drop(gid) });
+  syncLinkBtns(); copyLink();
+}
+// gæst: går ind på en vens bord
+async function joinTable(hc) {
+  closeNet();
+  const c = hc.slice(0, 5), bi = Math.min(BROKERS.length - 1, +hc[5] || 0), base = TOPIC(c);
+  $('status').classList.add('on');
+  const got = await relayFor(bi);
+  if (!got) { $('status').classList.remove('on'); toast('Ingen forbindelse til nettet'); return show('lobby') }
+  relay = got.r; code = hc;
+  const gid = acc.id.replace('u:', '');
+  const up = (o) => relay && relay.pub(base + '/up', { g: gid, o });
+  guest = { open: true, send: (o) => up(o) };
+  let heard = 0, gotState = false;
+  relay.sub(base + '/dn/' + gid); relay.sub(base + '/hb');
+  relay.on = (topic, v) => {
+    heard = Date.now();
+    if (topic === base + '/hb') { if (v.t === 'closed') hostGone('Bordet er lukket'); return }
+    if (v.t === 'state' || v.t === 'full') { if (!gotState) { gotState = true; $('status').classList.remove('on') } onState(v) }
+  };
+  relay.onstate = (ok) => { if (ok) up({ t: 'hello', name: acc.name, aura: acc.aura }) };
+  const hello = () => up({ t: 'hello', name: acc.name, aura: acc.aura });
+  hello();
+  const t0 = Date.now();
+  every(1500, () => { if (!gotState) { if (Date.now() - t0 > 10000) hostGone('Bordet findes ikke længere'); else hello() } });
+  every(4000, () => { up({ t: 'hb' }); if (gotState && Date.now() - heard > 16000) hostGone('Bordet er lukket') });
+}
+function hostGone(t) { if (!relay) return; $('status').classList.remove('on'); closeNet(); history.replaceState(null, '', location.pathname); toast(t); show('lobby') }
+function closeNet() {
+  if (hosting && relay) relay.pub(TOPIC(code.slice(0, 5)) + '/hb', { t: 'closed' });
+  if (guest && guest.send) { try { guest.send({ t: 'bye' }) } catch (e) {} }
+  netTimers.forEach(clearInterval); netTimers = [];
+  const r = relay; relay = null; if (r) setTimeout(() => r.close(), 150);
+  guest = null; hosting = false; code = '';
+  if (table && !table.solo) { table.clearTimer(); table.watch.clear(); table = null }
+}
+function leaveTable() {
+  if (table && table.solo) { table.watch.delete(myClient); table.leave(acc.id); table = null }
+  else { closeNet(); history.replaceState(null, '', location.pathname) }
+  show('lobby');
+}
+// solo-bordet holder sin runde, også når man går ud; aura gemmes løbende
+addEventListener('beforeunload', () => gemKonti());
 
 // ---------- login ----------
-let nameMode = '', pinFirst = '', existsT = 0, sentName = '';
+let nameMode = '', pinFirst = '';
 function resetLogin() { $('pinIn').value = ''; pinFirst = ''; drawPin(); setHint('') }
 function setHint(t, err) { const h = $('hint'); h.textContent = t; h.classList.toggle('err', !!err) }
 function drawPin() {
   const v = $('pinIn').value;
   [...$('pin').querySelectorAll('span')].forEach((s, i) => { s.classList.toggle('f', i < v.length); s.classList.toggle('cur', i === v.length) });
 }
+const kontoFor = (n) => konti[cleanName(n).toLowerCase()];
 $('name').addEventListener('input', () => {
-  clearTimeout(existsT); nameMode = '';
-  const n = $('name').value.trim();
-  $('pin').classList.toggle('off', n.length < 2); setHint('');
-  if (n.length >= 2) existsT = setTimeout(() => { sentName = n; send({ t: 'exists', name: n }) }, 220);
+  const n = cleanName($('name').value);
+  $('pin').classList.toggle('off', n.length < 2); pinFirst = ''; $('pinIn').value = ''; drawPin();
+  nameMode = n.length < 2 ? '' : kontoFor(n) ? 'old' : 'new';
+  setHint(nameMode === 'old' ? 'Kode' : nameMode === 'new' ? 'Vælg en kode' : '');
 });
-$('name').addEventListener('keydown', (e) => { if (e.key === 'Enter' && $('name').value.trim().length >= 2) $('pinIn').focus() });
-function onExists(m) {
-  if (m.name.toLowerCase() !== $('name').value.trim().replace(/\s+/g, ' ').toLowerCase() && sentName !== $('name').value.trim()) return;
-  nameMode = m.yes ? 'old' : 'new'; pinFirst = '';
-  setHint(m.yes ? 'Kode' : 'Vælg en kode');
-}
+$('name').addEventListener('keydown', (e) => { if (e.key === 'Enter' && nameMode) $('pinIn').focus() });
 $('pin').addEventListener('pointerdown', () => setTimeout(() => $('pinIn').focus(), 0));
-$('pinIn').addEventListener('input', () => {
+const tries = { n: 0, until: 0 };
+$('pinIn').addEventListener('input', async () => {
   const el = $('pinIn'); el.value = el.value.replace(/\D/g, '').slice(0, 4); drawPin();
-  if (el.value.length < 4) return;
-  const pin = el.value, name = $('name').value.trim();
-  if (!nameMode) { setTimeout(() => $('pinIn').dispatchEvent(new Event('input')), 200); return }
-  if (nameMode === 'old') { send({ t: 'login', name, pin }); return }
+  if (el.value.length < 4 || !nameMode) return;
+  const pin = el.value, name = cleanName($('name').value);
+  if (nameMode === 'old') {
+    if (Date.now() < tries.until) return failPin('Vent ' + Math.ceil((tries.until - Date.now()) / 1000) + ' sek');
+    const u = kontoFor(name);
+    if ((await hashPin(pin, u.salt)) !== u.pin) { if (++tries.n >= 5) { tries.n = 0; tries.until = Date.now() + 30000 } return failPin('Forkert kode') }
+    tries.n = 0; return signIn(u);
+  }
   if (!pinFirst) { pinFirst = pin; setTimeout(() => { el.value = ''; drawPin(); setHint('Gentag koden') }, 220); return }
-  if (pin !== pinFirst) { pinFirst = ''; failPin('Ikke ens, vælg igen'); return }
-  send({ t: 'create', name, pin });
+  if (pin !== pinFirst) { pinFirst = ''; return failPin('Ikke ens, vælg igen') }
+  const salt = rid(12);
+  const u = { id: 'u:' + rid(16), name, salt, pin: await hashPin(pin, salt), aura: START, best: START, made: Date.now() };
+  konti[name.toLowerCase()] = u; gemKonti(); signIn(u);
 });
 function failPin(t) {
   const p = $('pin'); p.classList.remove('shake'); void p.offsetWidth; p.classList.add('shake');
   setTimeout(() => { $('pinIn').value = ''; drawPin() }, 300); setHint(t, true);
 }
-const _onMsg = onMsg;
-onMsg = (m) => {
-  if (m.t === 'auth' && !m.ok && m.err && screen === 'login') {
-    const t = { forkert: 'Forkert kode', vent: 'Vent ' + (m.wait || 60) + ' sek', navn: 'Mindst 2 tegn', kode: '4 cifre', ukendt: 'Ukendt navn' }[m.err];
-    if (t) { failPin(t); return }
-  }
-  _onMsg(m);
-};
+function signIn(u) {
+  acc = u; localStorage.setItem('kort.ind', u.name.toLowerCase()); $('pinIn').blur();
+  const c = hashCode();
+  if (c) joinTable(c); else show('lobby');
+}
 
 // ---------- lobby ----------
 const DOTS = [[118, 6], [94, 30], [68, 40], [42, 30], [18, 6]];
-function renderLobby(m) {
-  $('lName').textContent = m.me ? m.me.name : '';
-  tweenText($('lAura'), m.me ? m.me.aura : 0);
+function renderLobby() {
+  $('lName').textContent = acc ? acc.name : '';
+  tweenText($('lAura'), acc ? acc.aura : 0);
   const dots = $('dots');
   if (!dots.children.length) DOTS.forEach(([x, y]) => { const b = document.createElement('b'); b.style.left = x + 'px'; b.style.top = y + 'px'; dots.appendChild(b) });
-  [...dots.children].forEach((b, i) => b.classList.toggle('on', i < m.bord.length));
-  $('bordWho').textContent = m.bord.length ? m.bord.join(', ') : ' ';
+  [...dots.children].forEach((b, i) => b.classList.toggle('on', i === 2));
+  $('bordWho').textContent = ' ';
   syncLinkBtns();
 }
 function syncLinkBtns() {
-  const has = !!link;
-  $('linkBtn').style.display = has ? '' : 'none';
-  $('linkTxt').textContent = has ? link.replace('https://', '') : '';
-  $('gLink').style.display = has && st && !st.solo ? '' : 'none';
+  $('linkBtn').style.display = 'none';
+  $('gLink').style.display = code && st && !st.solo ? '' : 'none';
 }
-async function copyLink() {
-  if (!link) return;
-  try { await navigator.clipboard.writeText(link) } catch (e) {
-    const t = document.createElement('textarea'); t.value = link; document.body.appendChild(t); t.select(); try { document.execCommand('copy') } catch (x) {} t.remove();
+async function copyLink(quiet) {
+  if (!code) return;
+  const l = GH + '#' + code;
+  let ok = true;
+  try { await navigator.clipboard.writeText(l) } catch (e) {
+    const t = document.createElement('textarea'); t.value = l; document.body.appendChild(t); t.select(); try { ok = document.execCommand('copy') } catch (x) { ok = false } t.remove();
   }
-  toast('Link kopieret');
+  toast(ok ? 'Link kopieret' : l);
 }
-$('linkBtn').onclick = copyLink; $('gLink').onclick = copyLink;
-$('tSolo').onclick = () => send({ t: 'join', mode: 'solo' });
-$('tBord').onclick = () => send({ t: 'join', mode: 'bord' });
-$('logout').onclick = () => { send({ t: 'logout', token }); token = ''; localStorage.removeItem('kort.token'); $('name').value = ''; $('pin').classList.add('off'); show('login') };
-$('leave').onclick = () => send({ t: 'leave' });
+$('gLink').onclick = () => copyLink();
+$('tSolo').onclick = () => playSolo();
+$('tBord').onclick = () => hostTable();
+$('logout').onclick = () => { leaveTable(); acc = null; localStorage.removeItem('kort.ind'); $('name').value = ''; $('pin').classList.add('off'); show('login') };
+$('leave').onclick = () => leaveTable();
+addEventListener('hashchange', () => { const c = hashCode(); if (acc && c && c !== code) joinTable(c) });
+
+function boot() {
+  const k = localStorage.getItem('kort.ind');
+  if (k && konti[k]) signIn(konti[k]); else show('login');
+}
 
 const tweens = new WeakMap();
 function tweenText(el, to, ms = 700) {
@@ -836,7 +1322,7 @@ function fit() {
 }
 addEventListener('resize', fit);
 
-connect();
+boot();
 </script>
 </body>
 </html>
