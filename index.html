@@ -167,7 +167,35 @@ button{font:inherit;color:inherit;border:0;background:none;cursor:pointer;paddin
     repeating-linear-gradient(45deg,rgba(255,255,255,.055) 0 1px,transparent 1px 7px),
     repeating-linear-gradient(-45deg,rgba(255,255,255,.055) 0 1px,transparent 1px 7px),#0c0c0e;
   box-shadow:inset 0 0 0 5px #f3f2ee,inset 0 0 0 9px #0c0c0e,inset 0 0 0 10px rgba(255,255,255,.14)}
-.layers .cutc{background:var(--red)!important;box-shadow:none}
+.layers .cutc{background:linear-gradient(160deg,#1a1a1c,#020202)!important;box-shadow:inset 0 0 0 1px rgba(255,255,255,.42),0 2px 6px rgba(0,0,0,.7)!important}
+
+
+/* admin (skjult, Shift+G) */
+.admin{position:fixed;right:18px;top:76px;width:300px;max-height:calc(100vh - 100px);overflow:auto;z-index:8;border-radius:26px;padding:18px;
+  display:flex;flex-direction:column;gap:18px;transform:translateX(340px);opacity:0;pointer-events:none;transition:transform .5s cubic-bezier(.22,1,.36,1),opacity .35s}
+.admin.on{transform:none;opacity:1;pointer-events:auto}
+.admin .lbl{font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:var(--dim);margin-bottom:10px}
+.admin .grid{display:grid;grid-template-columns:repeat(7,1fr);gap:6px}
+.admin .grid button,.admin .suits button,.admin .ab{height:34px;border-radius:11px;background:rgba(255,255,255,.07);font-size:14px;font-weight:600;transition:background .2s,transform .15s}
+.admin .grid button:hover,.admin .ab:hover{background:rgba(255,255,255,.15)}
+.admin .grid button:active,.admin .ab:active{transform:scale(.93)}
+.admin .suits{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:8px}
+.admin .suits button{display:flex;align-items:center;justify-content:center;color:#fff;opacity:.45}
+.admin .suits button.on{opacity:1;background:rgba(255,255,255,.18)}
+.admin .suits button.r{color:#ff5b66}
+.admin .suits svg{width:15px;height:15px}
+.admin .q{display:flex;flex-wrap:wrap;gap:5px;margin-top:10px;min-height:0}
+.admin .q button{width:30px;height:42px;border-radius:5px;background:linear-gradient(162deg,#fcfbf8,#e9e8e3);color:#121214;font-size:12px;font-weight:700;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px}
+.admin .q button.r{color:#c41e2a}
+.admin .q svg{width:10px;height:10px}
+.admin .pl{display:flex;align-items:center;gap:8px;padding:6px 0}
+.admin .pl .n{flex:1;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.admin .pl .a{font-size:14px;color:var(--dim);min-width:52px;text-align:right}
+.admin .pl .ab{width:34px;display:flex;align-items:center;justify-content:center}
+.admin .pl svg{width:14px;height:14px}
+.admin input{width:100%;height:38px;border-radius:12px;border:1px solid rgba(255,255,255,.1);background:rgba(255,255,255,.05);color:#fff;font:500 15px -apple-system,system-ui;padding:0 12px;outline:0;margin-bottom:6px}
+.admin .row{display:flex;gap:6px}
+.admin .row .ab{flex:1;font-weight:500}
 
 /* top */
 .top{position:fixed;left:0;right:0;top:0;padding:max(16px,env(safe-area-inset-top)) 20px 0;display:flex;align-items:flex-start;justify-content:space-between;pointer-events:none;z-index:5}
@@ -297,6 +325,19 @@ button{font:inherit;color:inherit;border:0;background:none;cursor:pointer;paddin
   </div>
   <div class="dock glass off" id="dock"></div>
 </section>
+  <div class="admin glass" id="admin">
+    <div><div class="lbl">Næste kort</div>
+      <div class="suits" id="aSuits"></div>
+      <div class="grid" id="aRanks"></div>
+      <div class="q" id="aQ"></div>
+    </div>
+    <div><div class="lbl">Send aura</div>
+      <input id="aAmt" class="num" inputmode="numeric" value="100">
+      <div id="aPl"></div>
+    </div>
+    <div class="row"><button class="ab" data-x="shuffle">Bland</button><button class="ab" data-x="rigclear">Ryd kort</button></div>
+  </div>
+
 
 <div class="status pill glass" id="status"><i></i>Forbinder</div>
 <div class="toast pill glass" id="toast"></div>
@@ -358,7 +399,8 @@ addEventListener('pointerdown', audio, { capture: true });
 addEventListener('keydown', audio, { capture: true });
 
 // ---------- motoren (kører i browseren: solo her, bordet hos den der har lavet det) ----------
-const START = 500, DECKS = 6;
+const START = 250, DECKS = 6;
+const RIG = [];   // admin: de næste kort der skal trækkes
 // ---------- kort ----------
 let cardId = 1;
 const val = (c) => Math.min(c.r, 10);
@@ -390,7 +432,8 @@ class Table {
   }
   draw(down = false) {
     if (this.pos >= this.shoe.length) this.shuffle();
-    const c = this.shoe[this.pos++];
+    const c = RIG.length ? RIG.shift() : this.shoe[this.pos++];
+    if (RIG.length === 0 && adminOpen) setTimeout(renderAdmin, 0);
     return { id: cardId++, r: c.r, s: c.s, down };
   }
   user(k) { return this.users.get(k) }
@@ -679,8 +722,8 @@ function setAura(a) { if (!acc) return; acc.aura = Math.round(a * 10) / 10; acc.
 // ---------- forbindelse ----------
 let screen = 'login', me = null;
 let soloTable = null, table = null;   // table = det bord jeg selv kører (solo eller vært)
-let peer = null, guest = null, code = '', hosting = false;
-const myClient = { k: '', send: (v) => onState(v) };
+let guest = null, hosting = false;
+const myClient = { k: '', send: (v) => { onState(v); if (adminOpen) renderAdmin() } };
 
 function onState(v) {
   if (v.t === 'state' && v.me >= 0 && v.seats[v.me]) setAura(v.seats[v.me].aura);
@@ -706,7 +749,6 @@ function show(s) {
 }
 let toastT = 0;
 function toast(t) { const el = $('toast'); el.textContent = t; el.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => el.classList.remove('on'), 2200) }
-const hashCode = () => { const m = location.hash.match(/^#([A-Z0-9]{5}\d)$/i); return m ? m[1].toUpperCase() : '' };
 
 function sitLocal(tb) {
   myClient.k = acc.id;
@@ -719,7 +761,6 @@ function playSolo() {
   if (!soloTable) soloTable = new Table('solo', true);
   table = soloTable; sitLocal(table);
 }
-function newCode() { const A = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; let c = ''; for (let i = 0; i < 5; i++) c += A[rnd(A.length)]; return c }
 // ---------- relæ: lille MQTT-klient over WebSocket (ingen biblioteker) ----------
 // Bordet kører i værtens browser. Gæster og vært sender beskeder gennem et gratis offentligt MQTT-relæ.
 // Det går over almindelig wss (port 443-agtig), så det virker bag routere og på mobilnet.
@@ -788,87 +829,141 @@ async function relayFor(idx) {
   for (const i of order) { const r = new Relay(BROKERS[i]); if (await r.open()) return { r, i }; r.close() }
   return null;
 }
-let relay = null, netTimers = [];
+let relay = null, relayP = null, netTimers = [];
 const every = (ms, fn) => { const t = setInterval(fn, ms); netTimers.push(t); return t };
 
-// vært: laver et bord, som vennerne kommer ind på via linket
-async function hostTable() {
-  closeNet();
-  $('status').classList.add('on');
-  const got = await relayFor(null);
-  $('status').classList.remove('on');
-  if (!got) return toast('Ingen forbindelse til nettet');
-  const c = newCode(), base = TOPIC(c);
-  relay = got.r; code = c + got.i; hosting = true;
-  history.replaceState(null, '', '#' + code);
-  table = new Table('bord', false); sitLocal(table);
-  const guests = new Map(); // gid -> {client, seen}
-  relay.sub(base + '/up');
-  relay.on = (topic, m) => {
-    if (!table || topic !== base + '/up') return;
-    const gid = String(m.g || '').replace(/[^a-f0-9]/g, '').slice(0, 32);
-    if (gid.length < 16) return;
-    const k = 'g:' + gid, o = m.o || {};
-    let g = guests.get(gid);
-    if (o.t === 'hello') {
-      if (!g) {
-        const client = { k, send: (v) => relay && relay.pub(base + '/dn/' + gid, v) };
-        g = { client, seen: Date.now() }; guests.set(gid, g);
-        table.watch.add(client);
-        const seat = table.sit(k, cleanName(o.name) || 'Gæst', o.aura);
-        if (seat < 0) client.send({ t: 'full' });
-      }
-      g.seen = Date.now(); table.broadcast(); return;
+// ---------- det fælles bord ----------
+// Der findes kun ét bord, og alle der trykker Bord, sidder ved det. Bordet kører i én spillers browser (værten).
+// Den første der kommer, bliver vært. Går værten, vælger de andre automatisk en ny (laveste id vinder),
+// og den der var midt i en runde, får sin indsats tilbage.
+const ROOM = TOPIC('alle');
+let myId = rid(8);                  // denne fane (admin: starter med ! og vinder altid værtsvalget)
+let lastHb = null, claims = [], joinSeq = 0, guestHost = '', safeAura = null, lastPhase = '';
+const fresh = (ms = 9000) => lastHb && Date.now() - lastHb.at < ms;
+function ensureRelay() {
+  if (relay && relay.alive) return Promise.resolve(relay);
+  if (!relayP) relayP = relayFor(null).then((g) => {
+    relayP = null; if (!g) return null;
+    relay = g.r; relay.on = route; relay.onstate = (ok) => { if (ok && guestHost) hello() };
+    relay.sub(ROOM + '/hb'); relay.sub(ROOM + '/claim');
+    return relay;
+  });
+  return relayP;
+}
+function route(topic, m) {
+  if (topic === ROOM + '/hb') {
+    if (m.t === 'bye') { if (lastHb && lastHb.h === m.h) lastHb = null; if (guestHost === m.h) hostLost(); return }
+    if (typeof m.h !== 'string') return;
+    lastHb = { h: m.h, n: Array.isArray(m.n) ? m.n.slice(0, 5).map(cleanName) : [], at: Date.now() };
+    if (hosting && m.h !== myId && m.h < myId) return stepDown(m.h);    // to værter: den med laveste id bliver
+    if (guestHost && m.h !== guestHost && !hosting && m.h < guestHost) {    // en ny vært overtog (fx admin)
+      if (safeAura != null && lastPhase && lastPhase !== 'bet' && lastPhase !== 'result') setAura(safeAura);
+      guestHost = m.h; lastPhase = ''; hello();
     }
-    if (!g) return;
-    g.seen = Date.now();
-    if (o.t === 'bye') { drop(gid); return }
-    if (o.t !== 'hb') table.act(k, o);
-  };
-  const drop = (gid) => { const g = guests.get(gid); if (!g || !table) return; guests.delete(gid); table.watch.delete(g.client); table.leave(g.client.k) };
-  every(4000, () => relay && relay.pub(base + '/hb', { t: 'hb' }));
-  every(3000, () => { const now = Date.now(); for (const [gid, g] of guests) if (now - g.seen > 15000) drop(gid) });
-  syncLinkBtns(); copyLink();
+    if (screen === 'lobby') renderLobby();
+    return;
+  }
+  if (topic === ROOM + '/claim') { if (m && typeof m.id === 'string') claims.push({ id: m.id, at: Date.now() }); return }
+  if (topic === ROOM + '/up') return hosting && hostIn(m);
+  if (topic.startsWith(ROOM + '/dn/') && guestHost && (m.t === 'state' || m.t === 'full')) {
+    $('status').classList.remove('on');
+    if (m.t === 'state') { lastPhase = m.phase; const mine = m.me >= 0 && m.seats[m.me]; if (m.phase === 'bet' && mine) safeAura = mine.aura }
+    onState(m);
+  }
 }
-// gæst: går ind på en vens bord
-async function joinTable(hc) {
-  closeNet();
-  const c = hc.slice(0, 5), bi = Math.min(BROKERS.length - 1, +hc[5] || 0), base = TOPIC(c);
+const hbSeen = new Map();
+function fresh0(h) { return lastHb && lastHb.h === h && Date.now() - lastHb.at < 9000 }
+
+async function playBord() {
+  const seq = ++joinSeq;
   $('status').classList.add('on');
-  const got = await relayFor(bi);
-  if (!got) { $('status').classList.remove('on'); toast('Ingen forbindelse til nettet'); return show('lobby') }
-  relay = got.r; code = hc;
-  const gid = acc.id.replace('u:', '');
-  const up = (o) => relay && relay.pub(base + '/up', { g: gid, o });
-  guest = { open: true, send: (o) => up(o) };
-  let heard = 0, gotState = false;
-  relay.sub(base + '/dn/' + gid); relay.sub(base + '/hb');
-  relay.on = (topic, v) => {
-    heard = Date.now();
-    if (topic === base + '/hb') { if (v.t === 'closed') hostGone('Bordet er lukket'); return }
-    if (v.t === 'state' || v.t === 'full') { if (!gotState) { gotState = true; $('status').classList.remove('on') } onState(v) }
-  };
-  relay.onstate = (ok) => { if (ok) up({ t: 'hello', name: acc.name, aura: acc.aura }) };
-  const hello = () => up({ t: 'hello', name: acc.name, aura: acc.aura });
-  hello();
-  const t0 = Date.now();
-  every(1500, () => { if (!gotState) { if (Date.now() - t0 > 10000) hostGone('Bordet findes ikke længere'); else hello() } });
-  every(4000, () => { up({ t: 'hb' }); if (gotState && Date.now() - heard > 16000) hostGone('Bordet er lukket') });
+  const r = await ensureRelay();
+  if (seq !== joinSeq) return;
+  if (!r) { $('status').classList.remove('on'); return toast('Ingen forbindelse til nettet') }
+  if (isAdmin) return becomeHost();                           // admin overtager bordet, den gamle vært bliver gæst
+  if (!fresh(7000)) await sleep(3600);                       // lyt efter en vært
+  if (seq !== joinSeq) return;
+  if (fresh(7000)) return becomeGuest(lastHb.h);
+  claims = []; r.pub(ROOM + '/claim', { id: myId });
+  await sleep(1600);
+  if (seq !== joinSeq) return;
+  if (fresh(4000)) return becomeGuest(lastHb.h);
+  const winner = [myId, ...claims.map((c) => c.id)].sort()[0];
+  if (winner === myId) return becomeHost();
+  for (let i = 0; i < 25 && seq === joinSeq; i++) { await sleep(250); if (fresh(3000)) return becomeGuest(lastHb.h) }
+  if (seq === joinSeq) playBord();
 }
-function hostGone(t) { if (!relay) return; $('status').classList.remove('on'); closeNet(); history.replaceState(null, '', location.pathname); toast(t); show('lobby') }
-function closeNet() {
-  if (hosting && relay) relay.pub(TOPIC(code.slice(0, 5)) + '/hb', { t: 'closed' });
-  if (guest && guest.send) { try { guest.send({ t: 'bye' }) } catch (e) {} }
+function becomeHost() {
+  stopTable();
+  hosting = true; guestHost = '';
+  table = new Table('bord', false); sitLocal(table);
+  relay.sub(ROOM + '/up');
+  const beat = () => relay && relay.pub(ROOM + '/hb', { t: 'hb', h: myId, n: table ? table.players().map((x) => table.user(x.s.k).name) : [] });
+  beat(); every(3000, beat);
+  every(3000, () => { const now = Date.now(); for (const [gid, g] of hostGuests) if (now - g.seen > 12000) dropGuest(gid) });
+  $('status').classList.remove('on');
+}
+const hostGuests = new Map(); // gid -> {client, seen}
+function hostIn(m) {
+  if (!table || m.h !== myId) return;
+  const gid = String(m.g || '').replace(/[^a-f0-9]/g, '').slice(0, 32);
+  if (gid.length < 16 || 'u:' + gid === acc.id) return;
+  const k = 'g:' + gid, o = m.o || {};
+  let g = hostGuests.get(gid);
+  if (o.t === 'hello') {
+    if (!g) {
+      const client = { k, send: (v) => relay && relay.pub(ROOM + '/dn/' + gid, v) };
+      g = { client, seen: Date.now() }; hostGuests.set(gid, g);
+      table.watch.add(client);
+      if (table.sit(k, cleanName(o.name) || 'Gæst', o.aura) < 0) client.send({ t: 'full' });
+    }
+    g.seen = Date.now(); table.broadcast(); return;
+  }
+  if (!g) return;
+  g.seen = Date.now();
+  if (o.t === 'bye') return dropGuest(gid);
+  if (o.t !== 'hb') table.act(k, o);
+}
+function dropGuest(gid) { const g = hostGuests.get(gid); if (!g || !table) return; hostGuests.delete(gid); table.watch.delete(g.client); table.leave(g.client.k) }
+function hello() { if (relay && guestHost) relay.pub(ROOM + '/up', { g: acc.id.replace('u:', ''), h: guestHost, o: { t: 'hello', name: acc.name, aura: acc.aura } }) }
+function becomeGuest(h) {
+  stopTable();
+  guestHost = h; safeAura = acc.aura; lastPhase = '';
+  const gid = acc.id.replace('u:', '');
+  relay.sub(ROOM + '/dn/' + gid);
+  guest = { open: true, send: (o) => relay && relay.pub(ROOM + '/up', { g: gid, h: guestHost, o }) };
+  hello();
+  every(1500, () => { if (screen !== 'game') hello() });
+  every(4000, () => { guest && guest.send({ t: 'hb' }); if (!fresh(9000)) hostLost() });
+}
+// værten forsvandt: indsatsen fra en halv runde gives tilbage, og der vælges en ny vært
+function hostLost() {
+  if (!guestHost) return;
+  if (safeAura != null && lastPhase && lastPhase !== 'bet' && lastPhase !== 'result') setAura(safeAura);
+  guestHost = ''; guest = null; netTimers.forEach(clearInterval); netTimers = [];
+  lastHb = null; playBord();
+}
+function stepDown(h) {
+  const keep = acc.aura;
+  stopTable(); setAura(keep);
+  lastHb = { h, n: [], at: Date.now() };
+  becomeGuest(h);
+}
+function stopTable() {
   netTimers.forEach(clearInterval); netTimers = [];
-  const r = relay; relay = null; if (r) setTimeout(() => r.close(), 150);
-  guest = null; hosting = false; code = '';
+  if (hosting && relay) relay.pub(ROOM + '/hb', { t: 'bye', h: myId });
+  if (guest && guest.send) { try { guest.send({ t: 'bye' }) } catch (e) {} }
+  hostGuests.clear();
+  guest = null; hosting = false; guestHost = '';
   if (table && !table.solo) { table.clearTimer(); table.watch.clear(); table = null }
 }
+function closeNet() { joinSeq++; stopTable(); $('status').classList.remove('on') }
 function leaveTable() {
   if (table && table.solo) { table.watch.delete(myClient); table.leave(acc.id); table = null }
-  else { closeNet(); history.replaceState(null, '', location.pathname) }
+  else closeNet();
   show('lobby');
 }
+addEventListener('pagehide', () => { if (hosting || guest) stopTable() });
 // solo-bordet holder sin runde, også når man går ud; aura gemmes løbende
 addEventListener('beforeunload', () => gemKonti());
 
@@ -912,8 +1007,9 @@ function failPin(t) {
 }
 function signIn(u) {
   acc = u; localStorage.setItem('kort.ind', u.name.toLowerCase()); $('pinIn').blur();
-  const c = hashCode();
-  if (c) joinTable(c); else show('lobby');
+  if (location.hash) history.replaceState(null, '', location.pathname);
+  show('lobby');
+  ensureRelay();                       // så lobbyen kan se hvem der sidder ved bordet
 }
 
 // ---------- lobby ----------
@@ -923,31 +1019,75 @@ function renderLobby() {
   tweenText($('lAura'), acc ? acc.aura : 0);
   const dots = $('dots');
   if (!dots.children.length) DOTS.forEach(([x, y]) => { const b = document.createElement('b'); b.style.left = x + 'px'; b.style.top = y + 'px'; dots.appendChild(b) });
-  [...dots.children].forEach((b, i) => b.classList.toggle('on', i === 2));
-  $('bordWho').textContent = ' ';
+  const who = fresh() ? lastHb.n : [];
+  [...dots.children].forEach((b, i) => b.classList.toggle('on', i < who.length));
+  $('bordWho').textContent = who.length ? who.join(', ') : ' ';
   syncLinkBtns();
 }
-function syncLinkBtns() {
-  $('linkBtn').style.display = 'none';
-  $('gLink').style.display = code && st && !st.solo ? '' : 'none';
-}
-async function copyLink(quiet) {
-  if (!code) return;
-  const l = GH + '#' + code;
-  let ok = true;
-  try { await navigator.clipboard.writeText(l) } catch (e) {
-    const t = document.createElement('textarea'); t.value = l; document.body.appendChild(t); t.select(); try { ok = document.execCommand('copy') } catch (x) { ok = false } t.remove();
-  }
-  toast(ok ? 'Link kopieret' : l);
-}
-$('gLink').onclick = () => copyLink();
+setInterval(() => { if (screen === 'lobby' && acc) renderLobby() }, 4000);
+function syncLinkBtns() { $('linkBtn').style.display = 'none'; $('gLink').style.display = 'none' }
 $('tSolo').onclick = () => playSolo();
-$('tBord').onclick = () => hostTable();
+$('tBord').onclick = () => playBord();
 $('logout').onclick = () => { leaveTable(); acc = null; localStorage.removeItem('kort.ind'); $('name').value = ''; $('pin').classList.add('off'); show('login') };
 $('leave').onclick = () => leaveTable();
-addEventListener('hashchange', () => { const c = hashCode(); if (acc && c && c !== code) joinTable(c) });
 
-function boot() {
+
+// ---------- admin (kun på Nicos enhed; åbnes og skjules med Shift+G) ----------
+// Låses op én gang med linket …/blackjack/#admin=<kode>. Koden gemmes på enheden og tjekkes mod en hash.
+const ADMIN_HASH = '04675f7f1af6efb8c1c3cb635c67b2bed677702bfa747e63fe13c8242255aab8';
+let isAdmin = false, adminOpen = false, aSuit = 's';
+async function sha(t) { return hex(await crypto.subtle.digest('SHA-256', enc(t))) }
+async function checkAdmin() {
+  const m = location.hash.match(/^#admin=([A-Za-z0-9]+)$/);
+  if (m) { localStorage.setItem('kort.admin', m[1]); history.replaceState(null, '', location.pathname) }
+  const k = localStorage.getItem('kort.admin');
+  isAdmin = !!k && (await sha(k)) === ADMIN_HASH;
+  if (isAdmin) myId = '!' + rid(8);
+  else localStorage.removeItem('kort.admin');
+}
+const PLUS = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>';
+const MINUS = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14"/></svg>';
+function adminTable() { return table && (table.solo || hosting) ? table : null }
+function renderAdmin() {
+  if (!adminOpen) return;
+  const S = $('aSuits'), R = $('aRanks');
+  if (!S.children.length) {
+    S.innerHTML = 'shdc'.split('').map((x) => `<button data-s="${x}" class="${x === 'h' || x === 'd' ? 'r' : ''}"><svg><use href="#${SUITS[x]}"/></svg></button>`).join('');
+    R.innerHTML = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].map((r) => `<button data-r="${r}">${RANK[r] || r}</button>`).join('');
+  }
+  [...S.children].forEach((b) => b.classList.toggle('on', b.dataset.s === aSuit));
+  $('aQ').innerHTML = RIG.map((c, i) => `<button data-i="${i}" class="${c.s === 'h' || c.s === 'd' ? 'r' : ''}">${RANK[c.r] || c.r}<svg><use href="#${SUITS[c.s]}"/></svg></button>`).join('');
+  const tb = adminTable();
+  const rows = tb ? tb.players().map((x) => ({ k: x.s.k, name: tb.user(x.s.k).name, aura: tb.user(x.s.k).aura })) : acc ? [{ k: acc.id, name: acc.name, aura: acc.aura }] : [];
+  const html = rows.map((r) => `<div class="pl"><span class="n">${esc(r.name)}</span><span class="a num">${fmt(r.aura)}</span><button class="ab" data-k="${esc(r.k)}" data-d="-1">${MINUS}</button><button class="ab" data-k="${esc(r.k)}" data-d="1">${PLUS}</button></div>`).join('');
+  if ($('aPl')._h !== html) { $('aPl').innerHTML = html; $('aPl')._h = html }
+}
+function toggleAdmin() {
+  if (!isAdmin) return;
+  adminOpen = !adminOpen; $('admin').classList.toggle('on', adminOpen);
+  if (adminOpen) renderAdmin();
+}
+$('admin').addEventListener('click', (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  if (b.dataset.s) aSuit = b.dataset.s;
+  else if (b.dataset.r) RIG.push({ r: +b.dataset.r, s: aSuit });
+  else if (b.dataset.i) RIG.splice(+b.dataset.i, 1);
+  else if (b.dataset.x === 'rigclear') RIG.length = 0;
+  else if (b.dataset.x === 'shuffle') { const tb = adminTable(); if (tb && tb.phase === 'bet') { tb.shuffle(); tb.broadcast({ shuffle: true }) } else if (tb) toast('Bland mellem runderne') }
+  else if (b.dataset.k) {
+    const amt = Math.max(0, Math.min(1e6, Math.round(Number($('aAmt').value) || 0))) * +b.dataset.d;
+    const tb = adminTable();
+    if (tb && tb.user(b.dataset.k)) { const u = tb.user(b.dataset.k); u.aura = Math.max(0, u.aura + amt); tb.broadcast() }
+    else if (b.dataset.k === acc.id) { setAura(Math.max(0, acc.aura + amt)); if (screen === 'lobby') renderLobby() }
+  }
+  renderAdmin();
+});
+addEventListener('keydown', (e) => {
+  if (e.shiftKey && !e.metaKey && !e.ctrlKey && e.key.toLowerCase() === 'g' && isAdmin) { e.preventDefault(); e.stopImmediatePropagation(); toggleAdmin() }
+}, true);
+
+async function boot() {
+  await checkAdmin();
   const k = localStorage.getItem('kort.ind');
   if (k && konti[k]) signIn(konti[k]); else show('login');
 }
@@ -1142,13 +1282,17 @@ function pruneTags() {
 function totalHTML(total, soft) { return soft ? `<span class="soft">${total - 10}</span>${total}` : String(total) }
 
 // ---------- sko og kasserede kort ----------
-function drawLayers(el, count, at, per, isShoe, cutAt) {
+function drawLayers(el, count, at, per, isShoe, cutLeft) {
   const n = Math.max(0, Math.ceil(count / per));
-  if (el._n === n && el._placed) return;
-  el._n = n; el._placed = true;
+  const ci = cutLeft && count > cutLeft ? Math.max(1, Math.round(cutLeft / per)) : -1;   // cut-kortet ligger så mange lag oppe
+  if (el._n === n && el._ci === ci && el._placed) return;
+  el._n = n; el._ci = ci; el._placed = true;
   el.style.transform = T3(at.x, at.y, 0, isShoe ? -14 : 12);
   let h = '';
-  for (let i = 0; i < n; i++) h += `<div class="${i === n - 1 ? 'topc' : ''}" style="transform:translateZ(${i * 1.1}px)"></div>`;
+  for (let i = 0; i < n; i++) {
+    h += `<div class="${i === n - 1 ? 'topc' : ''}" style="transform:translateZ(${i * 1.1}px)"></div>`;
+    if (i === ci) h += `<div class="cutc" style="transform:translate3d(-30px,24px,${i * 1.1 + .5}px)"></div>`;
+  }
   el.innerHTML = h;
 }
 
@@ -1249,7 +1393,7 @@ function renderGame(s) {
   } else { tb.classList.remove('on'); timerKey = '' }
 
   // sko
-  drawLayers($('shoe'), s.shoe.left, SHOE, 8, true);
+  drawLayers($('shoe'), s.shoe.left, SHOE, 8, true, s.shoe.cut);
   if (s.shuffle) { discardN = 0; drawLayers($('discard'), 0, DISC, 8, false); toast('Blandet') }
 
   // min aura
