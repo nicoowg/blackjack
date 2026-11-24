@@ -245,7 +245,8 @@ button{font:inherit;color:inherit;border:0;background:none;cursor:pointer;paddin
   .tiles{gap:12px}
   .tile{width:42vw;height:210px}
   .who .a{font-size:68px}
-  .dock{gap:6px;padding:7px;max-width:calc(100vw - 16px)}
+  .dock{gap:6px;padding:8px;width:calc(100vw - 16px);flex-wrap:wrap;justify-content:center;border-radius:28px}
+  .dock .sep{display:none}
   .dock .b{height:46px;padding:0 15px;font-size:14px}
   .dock .b.ic{width:46px}
   .dock .cb{width:46px;height:46px}
@@ -399,7 +400,8 @@ addEventListener('pointerdown', audio, { capture: true });
 addEventListener('keydown', audio, { capture: true });
 
 // ---------- motoren (kører i browseren: solo her, bordet hos den der har lavet det) ----------
-const START = 250, DECKS = 6;
+const START = 120, DECKS = 6, MAX_BET = 1e6;
+const CHIPS = [1, 5, 10, 25, 50, 100, 500, 1000];
 const RIG = [];   // admin: de næste kort der skal trækkes
 // ---------- kort ----------
 let cardId = 1;
@@ -471,12 +473,13 @@ class Table {
     const s = this.seats[i], u = this.user(s.k);
     if (this.phase === 'bet') {
       if (o.t === 'chip') {
-        const v = [5, 25, 100, 500].includes(o.v) ? o.v : 0;
-        if (!v || s.ready || u.aura - s.pend < v || s.pend + v > 5000) return;
+        const v = CHIPS.includes(o.v) ? o.v : 0;
+        if (!v || s.ready || u.aura - s.pend < v || s.pend + v > MAX_BET) return;
         s.pend += v; s.touched = true; this.armBetTimer();
       } else if (o.t === 'clear') { if (!s.ready) s.pend = 0 }
+      else if (o.t === 'allin') { const all = Math.min(MAX_BET, Math.floor(u.aura)); if (!s.ready && all > 0) { s.pend = all; s.touched = true; this.armBetTimer() } }
       else if (o.t === 'deal') { if (s.pend > 0 && s.pend <= u.aura) { s.ready = true; this.armBetTimer() } this.checkStart() }
-      else if (o.t === 'restart') { if (u.aura < 5 && !s.pend) { u.aura = START; u.restarts = (u.restarts || 0) + 1;  } }
+      else if (o.t === 'restart') { if (u.aura < 1 && !s.pend) { u.aura = START; u.restarts = (u.restarts || 0) + 1;  } }
       return this.broadcast();
     }
     if (this.phase === 'insurance') {
@@ -682,8 +685,8 @@ class Table {
     if (me >= 0) {
       const s = this.seats[me], u = this.user(s.k);
       if (this.phase === 'bet') {
-        if (u.aura < 5 && !s.pend) actions = ['restart'];
-        else if (!s.ready) { actions = [5, 25, 100, 500].filter((v) => u.aura - s.pend >= v).map((v) => 'c' + v); if (s.pend) actions.push('clear', 'deal') }
+        if (u.aura < 1 && !s.pend) actions = ['restart'];
+        else if (!s.ready) { actions = CHIPS.filter((v) => u.aura - s.pend >= v).map((v) => 'c' + v); if (Math.floor(u.aura) > s.pend) actions.push('allin'); if (s.pend) actions.push('clear', 'deal') }
       } else if (this.phase === 'insurance' && s.hands.length && !s.insDone) actions = ['ins', 'noins'];
       else if (this.phase === 'play' && this.turn && this.turn.seat === me) actions = this.allowed(s, s.hands[this.turn.hand]);
     }
@@ -1201,15 +1204,15 @@ function sweep(o, delay) {
 }
 
 // ---------- jetoner ----------
-const CHIP = { 500: ['#0b0b0c', '#c9a46a', '#e9d3a6'], 100: ['#2b2b30', '#f1f0ec', '#fff'], 25: ['#c41e2a', '#f6f4ef', '#fff'], 5: ['#f1f0ec', '#c41e2a', '#111'], 1: ['#6e6e74', '#f1f0ec', '#fff'] };
+const CHIP = { 1000: ['#4a2a78', '#efe9f7', '#fff'], 500: ['#0b0b0c', '#c9a46a', '#e9d3a6'], 100: ['#2b2b30', '#f1f0ec', '#fff'], 50: ['#b9822a', '#f6f1e6', '#fff'], 25: ['#c41e2a', '#f6f4ef', '#fff'], 10: ['#24489c', '#eef1f7', '#fff'], 5: ['#f1f0ec', '#c41e2a', '#111'], 1: ['#8d8d93', '#f4f4f2', '#fff'] };
 function chipsFor(amt) {
   const out = []; let a = Math.floor(amt + 1e-6);
-  for (const v of [500, 100, 25, 5, 1]) while (a >= v && out.length < 14) { out.push(v); a -= v }
+  for (const v of [1000, 500, 100, 50, 25, 10, 5, 1]) while (a >= v && out.length < 14) { out.push(v); a -= v }
   return out;
 }
 function chipEl(v) {
   const d = document.createElement('div'); d.className = 'chip'; const c = CHIP[v];
-  d.style.setProperty('--c', c[0]); d.style.setProperty('--e', c[1]); d.style.setProperty('--t', c[2]); d.dataset.v = v;
+  d.style.setProperty('--c', c[0]); d.style.setProperty('--e', c[1]); d.style.setProperty('--t', c[2]); d.dataset.v = v >= 1000 ? v / 1000 + 'K' : v;
   return d;
 }
 const stacks = new Map(); // key -> {el, amt, x, y, dir}
@@ -1220,9 +1223,10 @@ function fillStack(o, amt, label) {
   let tg = o.el.querySelector('.tag');
   if (label) {
     if (!tg) { tg = document.createElement('div'); tg.className = 'tag amt'; tg.innerHTML = '<div class="glass num"></div>'; o.el.appendChild(tg) }
-    tg.style.transform = TAG(0, -36 - list.length * 3, list.length * 4.5 + 6); tg.firstChild.textContent = fmt(amt);
+    const side = label === 'L' ? -1 : 1;
+    tg.style.transform = TAG(side * 40, 8 - list.length * 1.5, list.length * 4.5 + 4); tg.firstChild.style.transform = side < 0 ? 'translateX(-100%)' : 'none'; tg.firstChild.textContent = (label === '+' ? '+' : '') + fmt(amt);
   } else if (tg) tg.remove();
-  o.amt = amt;
+  o.amt = amt; o.label = label;
 }
 function syncStacks(s, prevPhase) {
   if (prevPhase === 'bet' && s.phase !== 'bet') for (let i = 0; i < 5; i++) if (stacks.has('P' + i)) { const o = stacks.get('P' + i); stacks.delete('P' + i); stacks.set(i + ':0', o) }
@@ -1233,10 +1237,10 @@ function syncStacks(s, prevPhase) {
     else p.hands.forEach((h, hi) => {
       const b = betXY(i, hi, p.hands.length);
       const lost = h.res === 'lose' || h.res === 'bust' || h.res === 'surr';
-      want.set(i + ':' + hi, { ...b, amt: h.res === 'surr' ? h.bet / 2 : h.bet, from: 'rim', dir: lost ? 'dealer' : 'rim' });
-      if (s.phase === 'result' && (h.res === 'win' || h.res === 'bj')) want.set(i + ':' + hi + ':p', { x: b.x + 50, y: b.y - 24, amt: h.res === 'bj' ? h.bet * 1.5 : h.bet, from: 'dealer', dir: 'rim' });
+      want.set(i + ':' + hi, { ...b, amt: h.res === 'surr' ? h.bet / 2 : h.bet, label: true, from: 'rim', dir: lost ? 'dealer' : 'rim' });
+      if (s.phase === 'result' && (h.res === 'win' || h.res === 'bj')) want.set(i + ':' + hi + ':p', { x: b.x + 62, y: b.y - 20, amt: h.res === 'bj' ? h.bet * 1.5 : h.bet, label: '+', from: 'dealer', dir: 'rim' });
     });
-    if (p.ins && s.phase !== 'bet') { const b = betXY(i, 0, 1); want.set(i + ':ins', { x: b.x - 54, y: b.y - 22, amt: p.ins, from: 'rim', dir: s.phase === 'result' && p.net > 0 ? 'rim' : 'dealer' }) }
+    if (p.ins && s.phase !== 'bet') { const b = betXY(i, 0, 1); want.set(i + ':ins', { x: b.x - 62, y: b.y - 20, amt: p.ins, label: 'L', from: 'rim', dir: s.phase === 'result' && p.net > 0 ? 'rim' : 'dealer' }) }
   });
   for (const [k, o] of stacks) if (!want.has(k)) {
     stacks.delete(k);
@@ -1256,7 +1260,7 @@ function syncStacks(s, prevPhase) {
       el.style.transform = T3(w.x, w.y, 0); requestAnimationFrame(() => { el.style.transition = '' });
       snd('chip');
     } else {
-      if (o.amt !== w.amt || !!w.label !== !!o.el.querySelector('.tag')) { const up = w.amt > o.amt; fillStack(o, w.amt, w.label); if (up) { snd('chip'); const top = o.el.querySelector('.chip.tc'); if (top) top.animate([{ opacity: 0, transform: top.style.transform + ' translateY(-30px)' }, { opacity: 1, transform: top.style.transform }], { duration: 260, easing: 'ease-out' }) } }
+      if (o.amt !== w.amt || o.label !== w.label) { const up = w.amt > o.amt; fillStack(o, w.amt, w.label); if (up) { snd('chip'); const top = o.el.querySelector('.chip.tc'); if (top) top.animate([{ opacity: 0, transform: top.style.transform + ' translateY(-30px)' }, { opacity: 1, transform: top.style.transform }], { duration: 260, easing: 'ease-out' }) } }
       if (o.x !== w.x || o.y !== w.y) o.el.style.transform = T3(w.x, w.y, 0);
     }
     o.x = w.x; o.y = w.y; if (w.dir) o.dir = w.dir; else o.dir = 'rim';
@@ -1441,12 +1445,13 @@ function renderDock(s) {
   let h = '';
   const chips = a.filter((x) => /^c\d+$/.test(x));
   chips.forEach((c) => { const v = +c.slice(1); h += `<button class="cb in" data-a="${c}" title="${v}"></button>` });
-  if (chips.length && (a.includes('clear') || a.includes('deal'))) h += '<span class="sep"></span>';
+  if (chips.length && (a.includes('clear') || a.includes('deal') || a.includes('allin'))) h += '<span class="sep"></span>';
+  if (a.includes('allin')) h += `<button class="b in" data-a="allin">Alt ind<kbd>A</kbd></button>`;
   if (a.includes('clear')) h += `<button class="b ic in" data-a="clear" title="Fjern">${X_ICON}</button>`;
   if (a.includes('deal')) h += `<button class="b pri in" data-a="deal">Giv <span class="num" style="opacity:.5">${fmt(mine.pend)}</span></button>`;
   for (const x of ['surrender', 'split', 'double', 'hit', 'stand', 'noins', 'ins', 'restart']) if (a.includes(x)) h += `<button class="b in${x === 'stand' || x === 'restart' || x === 'ins' ? ' pri' : ''}" data-a="${x}">${LABEL[x]}${KEY[x] ? `<kbd>${KEY[x]}</kbd>` : ''}</button>`;
   dock.innerHTML = h;
-  dock.querySelectorAll('.cb').forEach((b) => b.appendChild(chipEl(+b.dataset.a.slice(1))));
+  dock.querySelectorAll('.cb').forEach((b) => { const c = chipEl(+b.dataset.a.slice(1)); c.classList.add('tc'); b.appendChild(c) });
   dock.querySelectorAll('.in').forEach((b, i) => { b.style.animationDelay = i * 28 + 'ms' });
   dock.classList.remove('off');
 }
@@ -1469,7 +1474,7 @@ addEventListener('keydown', (e) => {
   if (screen !== 'game' || !st || e.metaKey || e.ctrlKey) return;
   const k = e.key.toLowerCase();
   if (e.repeat) return;
-  const map = { ' ': 'deal', enter: 'deal', h: 'hit', k: 'hit', g: 'stand', s: 'stand', d: 'double', p: 'split', o: 'surrender', f: 'ins', n: 'noins', backspace: 'clear', '1': 'c5', '2': 'c25', '3': 'c100', '4': 'c500' };
+  const map = { ' ': 'deal', enter: 'deal', h: 'hit', k: 'hit', g: 'stand', s: 'stand', d: 'double', p: 'split', o: 'surrender', f: 'ins', n: 'noins', backspace: 'clear', '1': 'c1', '2': 'c5', '3': 'c10', '4': 'c25', '5': 'c50', '6': 'c100', '7': 'c500', '8': 'c1000', a: 'allin' };
   let a = map[k];
   if ((k === ' ' || k === 'enter') && st.actions.includes('restart')) a = 'restart';
   if (a) { e.preventDefault(); doAct(a) }
