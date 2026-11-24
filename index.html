@@ -97,8 +97,8 @@ button{font:inherit;color:inherit;border:0;background:none;cursor:pointer;paddin
   background:radial-gradient(closest-side,rgba(255,255,255,.12),transparent);opacity:0;transform:translate3d(0,0,.5px);
   transition:transform .6s var(--ease),opacity .5s}
 
-.card{position:absolute;left:-52px;top:-73px;width:104px;height:146px;transform-style:preserve-3d;
-  transition:transform .55s var(--ease)}
+.card{position:absolute;left:-52px;top:-73px;width:104px;height:146px;transform-style:preserve-3d;will-change:transform;
+  transition:transform .7s cubic-bezier(.22,1,.36,1)}
 .card .flip{position:absolute;inset:0;transform-style:preserve-3d;transition:transform .6s cubic-bezier(.3,.65,.2,1)}
 .card.down .flip{transform:rotateY(180deg)}
 .card.down.peek .flip{transform:translateZ(16px) rotateX(-20deg) rotateY(180deg)}
@@ -113,19 +113,20 @@ button{font:inherit;color:inherit;border:0;background:none;cursor:pointer;paddin
     repeating-linear-gradient(45deg,rgba(255,255,255,.055) 0 1px,transparent 1px 7px),
     repeating-linear-gradient(-45deg,rgba(255,255,255,.055) 0 1px,transparent 1px 7px),#0c0c0e;
   box-shadow:inset 0 0 0 5px #f3f2ee,inset 0 0 0 6px rgba(0,0,0,.25),inset 0 0 0 9px #0c0c0e,inset 0 0 0 10px rgba(255,255,255,.14),0 0 0 .6px rgba(0,0,0,.4),0 7px 16px rgba(0,0,0,.6)}
-.ix{position:absolute;display:flex;flex-direction:column;align-items:center;width:20px;gap:2px}
-.ix b{font-size:19px;font-weight:600;letter-spacing:-.04em;line-height:1}
-.ix svg{width:12px;height:12px}
-.ix.tl{left:6px;top:7px}
-.ix.br{right:6px;bottom:7px;transform:rotate(180deg)}
-.pips{position:absolute;left:26px;right:26px;top:20px;bottom:20px}
-.pips svg{position:absolute;width:21px;height:21px;margin:-10.5px 0 0 -10.5px}
+.ix{position:absolute;display:flex;flex-direction:column;align-items:center;width:18px;gap:2px}
+.ix b{font-size:17px;font-weight:600;letter-spacing:-.04em;line-height:1;white-space:nowrap}
+.ix b.t{letter-spacing:-.1em;margin-left:-.1em}
+.ix svg{width:11px;height:11px}
+.ix.tl{left:4px;top:6px}
+.ix.br{right:4px;bottom:6px;transform:rotate(180deg)}
+.pips{position:absolute;left:33px;right:33px;top:21px;bottom:21px}
+.pips svg{position:absolute;width:18px;height:18px;margin:-9px 0 0 -9px}
 .pips svg.u{transform:rotate(180deg)}
 .ace{position:absolute;left:50%;top:50%;width:54px;height:54px;transform:translate(-50%,-50%)}
-.court{position:absolute;inset:16px 17px;border-radius:5px;border:1px solid currentColor;opacity:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px}
+.court{position:absolute;inset:11px 25px;border-radius:5px;border:1px solid currentColor;opacity:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px}
 .court::before{content:"";position:absolute;inset:3px;border-radius:3px;border:.6px solid currentColor;opacity:.35}
-.court b{font:400 52px/1 "Didot","Bodoni 72","Bodoni MT",Georgia,serif;letter-spacing:-.02em}
-.court svg{width:15px;height:15px}
+.court b{font:400 44px/1 "Didot","Bodoni 72","Bodoni MT",Georgia,serif;letter-spacing:-.02em}
+.court svg{width:13px;height:13px}
 
 .stack{position:absolute;left:0;top:0;transform-style:preserve-3d;transition:transform .6s var(--ease)}
 .chip{position:absolute;left:-29px;top:-29px;width:58px;height:58px;border-radius:50%;
@@ -191,6 +192,8 @@ button{font:inherit;color:inherit;border:0;background:none;cursor:pointer;paddin
 .dock .b:hover{background:rgba(255,255,255,.14)}
 .dock .b:active{transform:scale(.95)}
 .dock .b.pri{background:#fff;color:#000}
+.dock kbd{font:600 10.5px/1 -apple-system,system-ui;opacity:.42;border:1px solid currentColor;border-radius:5px;padding:2px 5px;margin-left:2px;letter-spacing:.02em}
+@media (hover:none){.dock kbd{display:none}}
 .dock .b.pri:hover{background:#e9e9e9}
 .dock .b.ic{width:50px;padding:0;justify-content:center}
 .dock .b.ic svg{width:17px;height:17px}
@@ -1007,7 +1010,8 @@ function faceHTML(c) {
   if (c.r === 1) mid = `<svg class="ace"><use href="#${SUITS[c.s]}"/></svg>`;
   else if (c.r > 10) mid = `<div class="court"><b>${rk}</b>${u}</div>`;
   else mid = '<div class="pips">' + PIPS[c.r].map(([x, y]) => `<svg class="${y > 50 ? 'u' : ''}" style="left:${x}%;top:${y}%"><use href="#${SUITS[c.s]}"/></svg>`).join('') + '</div>';
-  return `<div class="ix tl"><b>${rk}</b>${u}</div>${mid}<div class="ix br"><b>${rk}</b>${u}</div>`;
+  const b = `<b${c.r === 10 ? ' class="t"' : ''}>${rk}</b>`;
+  return `<div class="ix tl">${b}${u}</div>${mid}<div class="ix br">${b}${u}</div>`;
 }
 const cards = new Map(); // id -> {el, down, x,y,z,rz}
 let discardN = 0;
@@ -1029,11 +1033,21 @@ function dealIn(o, t, delay) {
   el.style.transform = TC(SHOE.x, SHOE.y, 46, -14);
   const mid = TC(SHOE.x + (t.x - SHOE.x) * .55, SHOE.y + (t.y - SHOE.y) * .55, 120, (t.rz - 14) / 2);
   const a = el.animate([{ transform: TC(SHOE.x, SHOE.y, 46, -14) }, { transform: mid, offset: .55 }, { transform: TC(t.x, t.y, t.z, t.rz) }],
-    { duration: 560, delay, easing: 'cubic-bezier(.25,.75,.25,1)', fill: 'backwards' });
+    { duration: 640, delay, easing: 'cubic-bezier(.2,.75,.2,1)', fill: 'backwards' });
   el.style.transform = TC(t.x, t.y, t.z, t.rz);
   setTimeout(() => snd('card'), delay + 20);
-  if (!t.down) setTimeout(() => { el.classList.remove('down'); o.down = false }, delay + 110);
+  if (!t.down) flipCard(o, true, delay + 120);
   a.onfinish = () => { el.style.transition = '' };
+}
+// kortet vender med et lille løft, så det ligner et rigtigt kort der bliver vendt
+function flipCard(o, up, delay) {
+  const f = o.el.querySelector('.flip');
+  o.down = !up; o.el.classList.remove('peek');
+  const from = up ? 'rotateY(180deg)' : 'rotateY(0deg)', to = up ? 'rotateY(0deg)' : 'rotateY(180deg)';
+  f.style.transition = 'none';
+  o.el.classList.toggle('down', !up);
+  f.animate([{ transform: 'translateZ(0) ' + from }, { transform: `translateZ(34px) rotateY(90deg) rotateX(${up ? -8 : 8}deg)`, offset: .5 }, { transform: 'translateZ(0) ' + to }],
+    { duration: 520, delay, easing: 'cubic-bezier(.45,.05,.25,1)', fill: 'backwards' }).onfinish = () => { f.style.transition = '' };
 }
 function sweep(o, delay) {
   const el = o.el;
@@ -1147,6 +1161,7 @@ function clearTable() {
   st = null; prevPhase = ''; mode = 0; dockKey = ''; old0 = -2;
 }
 function renderGame(s) {
+  waitState = false;
   const first = !st || st.id !== s.id;
   if (first) { clearTable(); mode = s.max; drawFelt(); discardN = 0; $('discard').innerHTML = ''; $('discard')._n = -1 }
   const seatChanged = old0 !== s.me; old0 = s.me;
@@ -1172,8 +1187,8 @@ function renderGame(s) {
     else {
       if (o.x !== t.x || o.y !== t.y || o.rz !== t.rz || o.z !== t.z) o.el.style.transform = TC(t.x, t.y, t.z, t.rz);
       setFace(o, t.c);
-      if (o.down && !t.down) { o.el.classList.remove('down'); o.down = false; snd('flip') }
-      else if (!o.down && t.down) { o.el.classList.add('down'); o.down = true }
+      if (o.down && !t.down) { flipCard(o, true, 0); snd('flip') }
+      else if (!o.down && t.down) flipCard(o, false, 0);
     }
     o.x = t.x; o.y = t.y; o.z = t.z; o.rz = t.rz;
   }
@@ -1265,6 +1280,7 @@ const esc = (t) => String(t).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&
 
 // ---------- dock ----------
 let dockKey = '';
+const KEY = { hit: 'H', stand: 'G', double: 'D', split: 'P', surrender: 'O', ins: 'F', noins: 'N' };
 const LABEL = { hit: 'Kort', stand: 'Stå', double: 'Doble', split: 'Del', surrender: 'Giv op', ins: 'Forsikring', noins: 'Nej tak', restart: 'Ny start' };
 const X_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>';
 function renderDock(s) {
@@ -1283,7 +1299,7 @@ function renderDock(s) {
   if (chips.length && (a.includes('clear') || a.includes('deal'))) h += '<span class="sep"></span>';
   if (a.includes('clear')) h += `<button class="b ic in" data-a="clear" title="Fjern">${X_ICON}</button>`;
   if (a.includes('deal')) h += `<button class="b pri in" data-a="deal">Giv <span class="num" style="opacity:.5">${fmt(mine.pend)}</span></button>`;
-  for (const x of ['surrender', 'split', 'double', 'hit', 'stand', 'noins', 'ins', 'restart']) if (a.includes(x)) h += `<button class="b in${x === 'stand' || x === 'restart' || x === 'ins' ? ' pri' : ''}" data-a="${x}">${LABEL[x]}</button>`;
+  for (const x of ['surrender', 'split', 'double', 'hit', 'stand', 'noins', 'ins', 'restart']) if (a.includes(x)) h += `<button class="b in${x === 'stand' || x === 'restart' || x === 'ins' ? ' pri' : ''}" data-a="${x}">${LABEL[x]}${KEY[x] ? `<kbd>${KEY[x]}</kbd>` : ''}</button>`;
   dock.innerHTML = h;
   dock.querySelectorAll('.cb').forEach((b) => b.appendChild(chipEl(+b.dataset.a.slice(1))));
   dock.querySelectorAll('.in').forEach((b, i) => { b.style.animationDelay = i * 28 + 'ms' });
@@ -1293,17 +1309,24 @@ $('dock').addEventListener('click', (e) => {
   const b = e.target.closest('[data-a]'); if (!b) return;
   doAct(b.dataset.a);
 });
+let waitState = false;
 function doAct(x) {
   if (!st || !(st.actions || []).includes(x)) return;
+  const chip = /^c\d+$/.test(x);
+  if (!chip && waitState) return;          // ét tryk = én handling, også ved dobbeltklik
+  if (!chip) { waitState = true; clearTimeout(doAct.t); doAct.t = setTimeout(() => { waitState = false }, 1500) }
+  const b = $('dock').querySelector(`[data-a="${x}"]`);
+  if (b) b.animate([{ transform: 'scale(1)' }, { transform: 'scale(.92)', offset: .35 }, { transform: 'scale(1)' }], { duration: 260, easing: 'cubic-bezier(.3,.7,.3,1)' });
   if (/^c\d+$/.test(x)) send({ t: 'chip', v: +x.slice(1) });
   else send({ t: x });
 }
 addEventListener('keydown', (e) => {
   if (screen !== 'game' || !st || e.metaKey || e.ctrlKey) return;
   const k = e.key.toLowerCase();
-  const map = { ' ': 'deal', enter: 'deal', k: 'hit', h: 'hit', s: 'stand', d: 'double', p: 'split', g: 'surrender', f: 'ins', n: 'noins', backspace: 'clear', '1': 'c5', '2': 'c25', '3': 'c100', '4': 'c500' };
+  if (e.repeat) return;
+  const map = { ' ': 'deal', enter: 'deal', h: 'hit', k: 'hit', g: 'stand', s: 'stand', d: 'double', p: 'split', o: 'surrender', f: 'ins', n: 'noins', backspace: 'clear', '1': 'c5', '2': 'c25', '3': 'c100', '4': 'c500' };
   let a = map[k];
-  if ((k === ' ' || k === 'enter') && st.actions.includes('stand')) a = 'stand';
+  if ((k === ' ' || k === 'enter') && st.actions.includes('restart')) a = 'restart';
   if (a) { e.preventDefault(); doAct(a) }
   if (k === 'escape') send({ t: 'leave' });
 });
