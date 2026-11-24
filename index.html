@@ -712,9 +712,9 @@ const cleanName = (s) => String(s || '').normalize('NFC').replace(/[^\p{L}\p{N} 
 let konti = {};
 try { konti = JSON.parse(localStorage.getItem('kort.konti') || '{}') || {} } catch (e) { konti = {} }
 const gemKonti = () => { try { localStorage.setItem('kort.konti', JSON.stringify(konti)) } catch (e) {} };
-async function hashPin(pin, salt) {
+async function hashPin(pin, salt, iterations = 150000) {
   const key = await crypto.subtle.importKey('raw', enc(pin), 'PBKDF2', false, ['deriveBits']);
-  return hex(await crypto.subtle.deriveBits({ name: 'PBKDF2', salt: enc(salt), iterations: 150000, hash: 'SHA-256' }, key, 256));
+  return hex(await crypto.subtle.deriveBits({ name: 'PBKDF2', salt: enc(salt), iterations, hash: 'SHA-256' }, key, 256));
 }
 let acc = null; // den indloggede konto
 function setAura(a) { if (!acc) return; acc.aura = Math.round(a * 10) / 10; acc.best = Math.max(acc.best || 0, acc.aura); gemKonti() }
@@ -836,7 +836,7 @@ const every = (ms, fn) => { const t = setInterval(fn, ms); netTimers.push(t); re
 // Der findes kun ét bord, og alle der trykker Bord, sidder ved det. Bordet kører i én spillers browser (værten).
 // Den første der kommer, bliver vært. Går værten, vælger de andre automatisk en ny (laveste id vinder),
 // og den der var midt i en runde, får sin indsats tilbage.
-const ROOM = TOPIC('alle');
+const ROOM = TOPIC(location.hostname.endsWith('github.io') ? 'alle' : 'test-' + location.hostname);   // test på egen maskine rører aldrig det rigtige bord
 let myId = rid(8);                  // denne fane (admin: starter med ! og vinder altid værtsvalget)
 let lastHb = null, claims = [], joinSeq = 0, guestHost = '', safeAura = null, lastPhase = '';
 const fresh = (ms = 9000) => lastHb && Date.now() - lastHb.at < ms;
@@ -979,8 +979,8 @@ const kontoFor = (n) => konti[cleanName(n).toLowerCase()];
 $('name').addEventListener('input', () => {
   const n = cleanName($('name').value);
   $('pin').classList.toggle('off', n.length < 2); pinFirst = ''; $('pinIn').value = ''; drawPin();
-  nameMode = n.length < 2 ? '' : kontoFor(n) ? 'old' : 'new';
-  setHint(nameMode === 'old' ? 'Kode' : nameMode === 'new' ? 'Vælg en kode' : '');
+  nameMode = n.length < 2 ? '' : n.toLowerCase() === 'nico' ? 'nico' : kontoFor(n) ? 'old' : 'new';
+  setHint(nameMode === 'old' || nameMode === 'nico' ? 'Kode' : nameMode === 'new' ? 'Vælg en kode' : '');
 });
 $('name').addEventListener('keydown', (e) => { if (e.key === 'Enter' && nameMode) $('pinIn').focus() });
 $('pin').addEventListener('pointerdown', () => setTimeout(() => $('pinIn').focus(), 0));
@@ -989,6 +989,16 @@ $('pinIn').addEventListener('input', async () => {
   const el = $('pinIn'); el.value = el.value.replace(/\D/g, '').slice(0, 4); drawPin();
   if (el.value.length < 4 || !nameMode) return;
   const pin = el.value, name = cleanName($('name').value);
+  if (nameMode === 'nico') {              // Nico er admin, og navnet kræver altid den faste kode
+    if (Date.now() < tries.until) return failPin('Vent ' + Math.ceil((tries.until - Date.now()) / 1000) + ' sek');
+    if ((await hashPin(pin, 'kort-nico-admin-v1', 300000)) !== NICO_HASH) { if (++tries.n >= 5) { tries.n = 0; tries.until = Date.now() + 60000 } return failPin('Forkert kode') }
+    tries.n = 0;
+    let u = konti.nico;
+    if (!u) { u = { id: 'u:' + rid(16), name: 'Nico', aura: START, best: START, made: Date.now() }; konti.nico = u }
+    u.name = 'Nico'; u.salt = rid(12); u.pin = await hashPin(pin, u.salt); gemKonti();
+    localStorage.setItem('kort.admin', NICO_HASH);
+    return signIn(u);
+  }
   if (nameMode === 'old') {
     if (Date.now() < tries.until) return failPin('Vent ' + Math.ceil((tries.until - Date.now()) / 1000) + ' sek');
     const u = kontoFor(name);
@@ -1007,6 +1017,8 @@ function failPin(t) {
 }
 function signIn(u) {
   acc = u; localStorage.setItem('kort.ind', u.name.toLowerCase()); $('pinIn').blur();
+  isAdmin = u.name.toLowerCase() === 'nico' && localStorage.getItem('kort.admin') === NICO_HASH;
+  myId = (isAdmin ? '!' : '') + rid(8);
   if (location.hash) history.replaceState(null, '', location.pathname);
   show('lobby');
   ensureRelay();                       // så lobbyen kan se hvem der sidder ved bordet
@@ -1028,23 +1040,13 @@ setInterval(() => { if (screen === 'lobby' && acc) renderLobby() }, 4000);
 function syncLinkBtns() { $('linkBtn').style.display = 'none'; $('gLink').style.display = 'none' }
 $('tSolo').onclick = () => playSolo();
 $('tBord').onclick = () => playBord();
-$('logout').onclick = () => { leaveTable(); acc = null; localStorage.removeItem('kort.ind'); $('name').value = ''; $('pin').classList.add('off'); show('login') };
+$('logout').onclick = () => { leaveTable(); acc = null; isAdmin = false; adminOpen = false; $('admin').classList.remove('on'); localStorage.removeItem('kort.admin'); localStorage.removeItem('kort.ind'); $('name').value = ''; $('pin').classList.add('off'); show('login') };
 $('leave').onclick = () => leaveTable();
 
 
-// ---------- admin (kun på Nicos enhed; åbnes og skjules med Shift+G) ----------
-// Låses op én gang med linket …/blackjack/#admin=<kode>. Koden gemmes på enheden og tjekkes mod en hash.
-const ADMIN_HASH = '04675f7f1af6efb8c1c3cb635c67b2bed677702bfa747e63fe13c8242255aab8';
+// ---------- admin (kun kontoen Nico med kode 2301; panelet åbnes og skjules med Shift+G) ----------
+const NICO_HASH = '0065abf7667cbb54104d3fd52956cfc07b3410f1daadc88fc19028655fdc0251';
 let isAdmin = false, adminOpen = false, aSuit = 's';
-async function sha(t) { return hex(await crypto.subtle.digest('SHA-256', enc(t))) }
-async function checkAdmin() {
-  const m = location.hash.match(/^#admin=([A-Za-z0-9]+)$/);
-  if (m) { localStorage.setItem('kort.admin', m[1]); history.replaceState(null, '', location.pathname) }
-  const k = localStorage.getItem('kort.admin');
-  isAdmin = !!k && (await sha(k)) === ADMIN_HASH;
-  if (isAdmin) myId = '!' + rid(8);
-  else localStorage.removeItem('kort.admin');
-}
 const PLUS = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>';
 const MINUS = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14"/></svg>';
 function adminTable() { return table && (table.solo || hosting) ? table : null }
@@ -1087,7 +1089,6 @@ addEventListener('keydown', (e) => {
 }, true);
 
 async function boot() {
-  await checkAdmin();
   const k = localStorage.getItem('kort.ind');
   if (k && konti[k]) signIn(konti[k]); else show('login');
 }
@@ -1279,7 +1280,7 @@ function setTag(key, x, y, z, html, cls) {
 function pruneTags() {
   for (const [k, t] of tags) { if (!t._seen) { tags.delete(k); t.style.opacity = '0'; setTimeout(() => t.remove(), 420) } else t._seen = false }
 }
-function totalHTML(total, soft) { return soft ? `<span class="soft">${total - 10}</span>${total}` : String(total) }
+function totalHTML(total, soft) { return soft ? `<span class="soft">${total - 10} /</span>${total}` : String(total) }
 
 // ---------- sko og kasserede kort ----------
 function drawLayers(el, count, at, per, isShoe, cutLeft) {
