@@ -839,7 +839,8 @@ const every = (ms, fn) => { const t = setInterval(fn, ms); netTimers.push(t); re
 // Der findes kun ét bord, og alle der trykker Bord, sidder ved det. Bordet kører i én spillers browser (værten).
 // Den første der kommer, bliver vært. Går værten, vælger de andre automatisk en ny (laveste id vinder),
 // og den der var midt i en runde, får sin indsats tilbage.
-const ROOM = TOPIC(location.hostname.endsWith('github.io') ? 'alle' : 'test-' + location.hostname);   // test på egen maskine rører aldrig det rigtige bord
+const BORD = (new URLSearchParams(location.search).get('bord') || '').replace(/[^a-z0-9]/gi, '').slice(0, 40);   // privat bord, fx fra et hvisk-rum
+const ROOM = TOPIC(BORD ? 'rum-' + BORD : location.hostname.endsWith('github.io') ? 'alle' : 'test-' + location.hostname);   // test på egen maskine rører aldrig det rigtige bord
 let myId = rid(8);                  // denne fane (admin: starter med ! og vinder altid værtsvalget)
 let lastHb = null, claims = [], joinSeq = 0, guestHost = '', safeAura = null, lastPhase = '';
 const fresh = (ms = 9000) => lastHb && Date.now() - lastHb.at < ms;
@@ -1025,6 +1026,7 @@ function signIn(u) {
   if (location.hash) history.replaceState(null, '', location.pathname);
   show('lobby');
   ensureRelay();                       // så lobbyen kan se hvem der sidder ved bordet
+  if (BORD) playBord();                // åbnet fra hvisk: gå direkte til rummets eget bord
 }
 
 // ---------- lobby ----------
